@@ -155,14 +155,14 @@ if __name__ == "__main__":
                     model = models.CellposeModel(gpu=True, pretrained_model='cyto3')
         
         
-        filter_choice = messagebox.askyesno("Filter files", "Filter the files based on a CSV file?")
-        if filter_choice:
-            sort_path = fd.askopenfilename(title='Select the csv with the files to include', filetypes=[('CSV files', '*.csv')])
-            if sort_path:
-                df = read_csv(sort_path)
-                df = df.where(df['Free']=='Yes').dropna(how='any')
-                list_of_files = df['File'].tolist()
-                files = [f for f in files if os.path.basename(f).split(' ')[1] in list_of_files]
+        # filter_choice = messagebox.askyesno("Filter files", "Filter the files based on a CSV file?")
+        # if filter_choice:
+        #     sort_path = fd.askopenfilename(title='Select the csv with the files to include', filetypes=[('CSV files', '*.csv')])
+        #     if sort_path:
+        #         df = read_csv(sort_path)
+        #         df = df.where(df['Free']=='Yes').dropna(how='any')
+        #         list_of_files = df['File'].tolist()
+        #         files = [f for f in files if os.path.basename(f).split(' ')[1] in list_of_files]
 
     root.destroy()  # Destroy the root window after getting inputs
     # endregion
