@@ -16,6 +16,7 @@ from skimage.measure import regionprops_table
 from skimage.exposure import rescale_intensity
 from skimage.util import dtype_limits
 from pandas import DataFrame
+from tqdm import tqdm
 
 def read_any_format_to_numpy(file_path):
     """
@@ -149,7 +150,7 @@ if __name__ == "__main__":
             else:    
                 if cellpose_version >= '4.0':
                     # Use cellposeSAM model
-                    model = models.CellposeModel(gpu=True)
+                    model = models.CellposeModel(gpu=True, verbose=True)
                 elif cellpose_version < '4.0':
                     # Use cyto3 model on its own
                     model = models.CellposeModel(gpu=True, pretrained_model='cyto3')
@@ -171,7 +172,7 @@ if __name__ == "__main__":
     # region
     # Loop through the selected files and process each one
     start_all = time.perf_counter()  # Start the timer for all files
-    for i, file_path in enumerate(files):
+    for i, file_path in enumerate(tqdm(files, desc="Processing files", unit="file")):
         start_file = time.perf_counter()  # Start the timer
         # Read images. segment and save masks
         image_list = read_any_format_to_numpy(file_path)
@@ -187,7 +188,7 @@ if __name__ == "__main__":
                 #np.save(os.path.join(savedir, f"denoised_{os.path.basename(file_path)}.npy"), imgs_dn)
 
             else:
-                masks, flows, styles = model.eval(image_list, diameter=model_diameter)
+                masks, flows, styles = model.eval(image_list, diameter=model_diameter, verbose=True)
 
             #image=np.array(image_list).astype(np.uint8).squeeze()
             masks = np.array(masks).astype(np.uint8)
@@ -202,11 +203,12 @@ if __name__ == "__main__":
             #image = np.asarray(image_list).squeeze()
             end_denoising = time.perf_counter()
             print(f"Denoising time for {os.path.basename(file_path)}: {end_denoising - start_denoising:.2f} seconds")
-        
+        # Generate the file name without the extension 
         try:
             file = os.path.basename(file_path).split(" ")[1]
         except:
             file = os.path.basename(file_path).split(".")[0]
+
         # Make image uint8 for saving
         image = np.array(image_list).squeeze()
         # Scale the image to uint8 if it is not already using skimage
