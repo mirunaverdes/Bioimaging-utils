@@ -53,6 +53,8 @@ def read_any_format_to_numpy(file_path):
         with tifffile.TiffFile(file_path) as tif:
             images = [page.asarray() for page in tif.pages]
         return images
+    elif file_path.endswith('.npy'):
+        return list(np.load(file_path))  # Load the .npy file and return as a list
     else:
         raise ValueError("Unsupported file format.")
 
@@ -150,7 +152,7 @@ if __name__ == "__main__":
             else:    
                 if cellpose_version >= '4.0':
                     # Use cellposeSAM model
-                    model = models.CellposeModel(gpu=True, verbose=True)
+                    model = models.CellposeModel(gpu=True)
                 elif cellpose_version < '4.0':
                     # Use cyto3 model on its own
                     model = models.CellposeModel(gpu=True, pretrained_model='cyto3')
@@ -176,7 +178,7 @@ if __name__ == "__main__":
         start_file = time.perf_counter()  # Start the timer
         # Read images. segment and save masks
         image_list = read_any_format_to_numpy(file_path)
-        print(f"Processing file {i+1}/{len(files)}: {os.path.basename(file_path)}")
+        print(f"\nProcessing file {i+1}/{len(files)}: {os.path.basename(file_path)}")
         
         if segmented:
             start_segmentation = time.perf_counter()  # Start the timer
@@ -188,7 +190,7 @@ if __name__ == "__main__":
                 #np.save(os.path.join(savedir, f"denoised_{os.path.basename(file_path)}.npy"), imgs_dn)
 
             else:
-                masks, flows, styles = model.eval(image_list, diameter=model_diameter, verbose=True)
+                masks, flows, styles = model.eval(image_list, diameter=model_diameter)
 
             #image=np.array(image_list).astype(np.uint8).squeeze()
             masks = np.array(masks).astype(np.uint8)
