@@ -17,6 +17,8 @@ from skimage.exposure import rescale_intensity
 from skimage.util import dtype_limits
 from pandas import DataFrame
 from tqdm import tqdm
+#from readlif.reader import LifFile
+
 
 def read_any_format_to_numpy(file_path):
     """
@@ -48,7 +50,13 @@ def read_any_format_to_numpy(file_path):
             print("Unsupported ND2 file format with positions and timelapse not yet supported.")
             print("Processing only the first position and time frame.")
             return [np.array(image.isel(P=0, T=0))]
-        
+    # elif file_path.endswith('.lif'):
+    #     with LifFile(file_path) as lif:
+    #         images = []
+    #         for series in lif.series:
+    #             for image in series.images:
+    #                 images.append(image.asarray())
+    #         return images    
     elif file_path.endswith(('.tif', '.tiff')):
         with tifffile.TiffFile(file_path) as tif:
             images = [page.asarray() for page in tif.pages]
