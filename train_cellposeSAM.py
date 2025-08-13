@@ -9,6 +9,7 @@ from nd2 import imread as nd2_imread
 import time
 from functools import wraps
 from tqdm import tqdm
+from utils import crop_large_image, stitch_images
 
 io.logger_setup()
 
@@ -98,7 +99,7 @@ def train_cpSAM(images, labels, save_path, proportion=0.7, weight_decay=0.1, lea
     # Get save path for the model
     model_name = os.path.basename(save_path).split('.')[0]  # Get the name of the model from the save path
     save_dir = os.path.dirname(save_path)  # Get the directory to save the model in
-    model = models.CellposeModel(gpu=True, verbose=True)
+    model = models.CellposeModel(gpu=True)
     print(f"Training Cellpose SAM model with {len(train_images)} training images and {len(test_images)} testing images.")
     print(f"Model will be saved to {save_dir} with name {model_name}.")
     print(f"Using proportion: {proportion}, weight decay: {weight_decay}, learning rate: {learning_rate}, epochs: {n_epochs}")
@@ -107,7 +108,7 @@ def train_cpSAM(images, labels, save_path, proportion=0.7, weight_decay=0.1, lea
                                 train_data=train_images, train_labels=train_labels,
                                 test_data=test_images, test_labels=test_labels,
                                 weight_decay=weight_decay, learning_rate=learning_rate,
-                                n_epochs=n_epochs, model_name=model_name, save_path=save_dir, verbose=True)
+                                n_epochs=n_epochs, model_name=model_name, save_path=save_dir)
     print(f"Model saved to {model_path}")
     return model_path, train_losses, test_losses
 
@@ -155,26 +156,29 @@ if __name__ == "__main__":
         if 'image' in file:
             #if file.endswith(".tif") or file.endswith(".tiff"):
             try:
-                image = io.imread(path).tolist()
+                image = io.imread(path)
             #elif file.endswith(".npy"):
             except:
                 if file.endswith(".npy"):
                     # If the file is a numpy array, load it
-                    image = np.load(path, allow_pickle=True).tolist()
+                    image = np.load(path, allow_pickle=True)
                 elif file.endswith(".nd2"):
-                    image = nd2_imread(path).tolist()
+                    image = nd2_imread(path)
                 elif file.endswith(".tiff") or file.endswith(".tif"):
-                    image = tif_imread(path).tolist()
+                    image = tif_imread(path)
                 else:
                     raise ValueError(f"Unsupported file format: {file}")
-            images.extend(image)
+            images.append(image)
         elif 'masks' in file:
             if file.endswith(".tif") or file.endswith(".tiff"):
-                mask = tif_imread(path).tolist()
+                mask = tif_imread(path)
             elif file.endswith(".npy"):
-                mask = np.load(path).tolist()
-            labels.extend(mask)
+                mask = np.load(path)
+            labels.append(mask)
 
+    if len(images) == 1:
+        images = crop_large_image(images[0], n_segments=2)  # Crop the image into smaller patches if needed
+        labels = crop_large_image(labels[0], n_segments=2)  # Crop the mask into smaller patches if needed
     model_path, train_losses, test_losses = train_cpSAM(images, labels, save_path, proportion=proportion, weight_decay=weight_decay, learning_rate=learning_rate, n_epochs=n_epochs)
     
     # Plot training losses and testing losses vs epochs
