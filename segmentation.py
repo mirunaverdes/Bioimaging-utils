@@ -26,7 +26,45 @@ from utils import crop_large_image, stitch_images, convert_to_minimal_format
 PROPERTIES_ALL = ('label', 'area', 'perimeter', 'centroid', 'intensity_mean', 'intensity_min', 'intensity_max', 'intensity_std','bbox', 'eccentricity', 'solidity', 'orientation', 'major_axis_length', 'minor_axis_length')
 PROPERTIES_MINIMAL = ('label', 'area', 'perimeter', 'centroid', 'intensity_mean', 'intensity_min', 'intensity_max', 'intensity_std')
 PROPERTIES_NO_INTENSITY = ('label', 'area', 'perimeter', 'centroid', 'bbox', 'eccentricity', 'solidity', 'orientation', 'major_axis_length', 'minor_axis_length')   
+REGIONPROPS_FOR_TABLE = (
+    # always ok (no intensity image needed)
+    "label",
+    "area",
+    "bbox",
+    "bbox_area",
+    "centroid",
+    "convex_area",
+    "eccentricity",
+    "equivalent_diameter_area",
+    "euler_number",
+    "extent",
+    "feret_diameter_max",
+    "filled_area",
+    "inertia_tensor",
+    "inertia_tensor_eigvals",
+    "local_centroid",
+    "major_axis_length",
+    "minor_axis_length",
+    #"moments",
+    #"moments_central",
+    #"moments_hu",
+    #"moments_normalized",
+    "orientation",
+    "perimeter",
+    "perimeter_crofton",
+    "solidity",
 
+    # require intensity_image=... when calling regionprops_table(...)
+    "max_intensity",
+    "mean_intensity",
+    "min_intensity",
+    #"weighted_centroid",
+    #"weighted_local_centroid",
+    #"moments_weighted",
+    #"moments_weighted_central",
+    #"moments_weighted_hu",
+    #"moments_weighted_normalized",
+)
 def timeit(func):
     def wrapper(*args, **kwargs):
         start = time.perf_counter()
@@ -409,8 +447,8 @@ def process_files_multichannel(files, model, model_diameter, savedir, savefix, g
 @timeit
 def process_files_multichannel_2(
     files, model, model_diameter, savedir, savefix,
-    get_regionprops=True, channels=[0, 1], subset=slice(None),
-    chunksize=[1, 1]
+    get_regionprops=True, segment_channels=[1, 0], intensity_channels=None, subset=slice(None),
+    chunksize=[1, 1], scene_identifiers=None
 ):
     """
     Processes a list of files with multiple channels using AICSImage, segments them using the Cellpose model,
@@ -422,9 +460,11 @@ def process_files_multichannel_2(
         savedir (str): Directory where the masks and region properties will be saved.
         savefix (str): Suffix to append to the saved file names.
         get_regionprops (bool): Whether to compute and save region properties.
-        channels (list): List of channel indices to process. First index is the channel to segment, second onward index is/are the channel(s) to use for regionprops intensity metrics.
+        segment_channels (list): List of channel indices to use for segmentation. First index is the channel to segment, the second is optional channel with nuclei.
+        intensity_channels (list): List of channel indices to use for regionprops intensity metrics.
         subset (slice): Slice object to select a subset of images from the cropped image list. Is slice(None) by default, which means all images will be processed.
         chunksize (list): List of chunk sizes for processing the images. The first element is the chunk size for the x dimension, the second element is the chunk size for the y dimension.
+        scene_identifiers (list): List of scene identifiers to process. If None, all scenes will be processed.
     """
     # from pandas import DataFrame, concat
     # import numpy as np
@@ -433,36 +473,49 @@ def process_files_multichannel_2(
     # from tqdm import tqdm
 
     for file_path in tqdm(files, desc="Processing files", unit="file"):
+        
         try:
             img = AICSImage(file_path)
         except:
             if file_path.endswith(".npy"):
                 data=np.load(file_path)
             img = AICSImage(data)
-        for scene in img.scenes:
+        scenes = img.scenes if scene_identifiers is None else [scene for scene in img.scenes if any(s in scene for s in scene_identifiers)]
+        for scene in scenes:
             img.set_scene(scene)
             # Read segmentation channel (as 2D or 3D if needed)
-            seg_channel = channels[0]
-            seg_img = img.get_image_dask_data("YX", C=seg_channel)
+            seg_img = img.get_image_dask_data("CYX", C=sorted(segment_channels))
             # Apply median filter to denoise the segmentation channel
             #seg_img = median(seg_img)
             seg_list = crop_large_image(seg_img, n_segments_x = chunksize[0], n_segments_y = chunksize[1])  # Crop the image into smaller patches if needed
-            seg_list = seg_list[subset]
+            try:
+                seg_list = seg_list[subset]
+            except Exception as e:
+                print(f"Error occurred while applying subset: {e}")
             seg_list = [patch.compute() for patch in seg_list]
 
             #seg_img_np = np.array(seg_img).squeeze()  # shape: (Y, X)
 
             # Segment
-            masks, _, _ = model.eval(seg_list, diameter=model_diameter, min_size=0)
+            masks, _, _ = model.eval(seg_list, channels = segment_channels, diameter=model_diameter, min_size=0)
             
             
             # Save masks and images
             base = os.path.splitext(os.path.basename(file_path))[0]
-            if len(base) > 50:
-                base = base[:50]  # Truncate base name to 50 characters if too long
+            if len(base) > 25:
+                base = base[:25]  # Truncate base name to 25 characters if too long
+            base = base + f"_{scene.replace(' ', '_')}"
             if savefix:
                 base = base + f"_{savefix}"
+            # Create filename
             filename = f"masks_d-{model_diameter}_{base}.npy"
+            # Check if file already exists
+            if os.path.exists(os.path.join(savedir, filename)):
+                # Rename file by appending a number
+                i = 1
+                while os.path.exists(os.path.join(savedir, f"{i}_{filename}")):
+                    i += 1
+                filename = f"{i}_{filename}"
 
             # Save masks
             if subset == slice(None):
@@ -471,6 +524,10 @@ def process_files_multichannel_2(
                 # Relabel masks
                 masks = label(masks)
                 masks = convert_to_minimal_format(masks)  # Convert to minimal format
+                seg_img = stitch_images(seg_list, n_segments_x=chunksize[0], n_segments_y=chunksize[1])
+                # Check seg_img and masks have same shape
+                if seg_img.shape != masks.shape:
+                    print(f"Warning: seg_img and masks have different shapes: {seg_img.shape} vs {masks.shape}")                    
                 np.save(os.path.join(savedir, filename), masks)
                 np.save(os.path.join(savedir, f"image_{base}.npy"), seg_img)
                 print(f"Masks and image.npy save path: {os.path.join(savedir, filename)}")
@@ -480,34 +537,43 @@ def process_files_multichannel_2(
                 np.save(os.path.join(savedir, filename), masks)
                 np.save(os.path.join(savedir, f"image_{base}.npy"), seg_list)
                 print(f"Masks and image.npy save path: {os.path.join(savedir, filename)}")
-
+            
             # Get intensity data and save as npy
             # Read all regionprops channels and stack as last axis
-            intensity_img = img.get_image_dask_data("YXC", C=channels[1:])  # shape: (Y, X, C)
+            intensity_img = img.get_image_dask_data("YXC", C=intensity_channels)  # shape: (Y, X, C)
             intensity_list = crop_large_image(intensity_img, n_segments_x = chunksize[0], n_segments_y = chunksize[1])  # Crop the image into smaller patches if needed
             intensity_list = intensity_list[subset]
             # Regionprops
             props_df = None
             if get_regionprops:
-
                 all_props = []
+                
                 try:
                     # If masks is 3D (batch), loop; else, just one mask
                     if masks.ndim == 3:
                         mask_list = masks
                     else:
+                        # Check if masks and intensity images have the same shape
+                        if (intensity_img.ndim==2 and masks.shape != intensity_img.shape) or (intensity_img.ndim==3 and masks.shape != intensity_img.shape[:2]):
+                             print(f"Warning: masks and intensity images have different shapes: {masks.shape} vs {intensity_img.shape}. Will overlap by cropping the ends of the images.")
+                             min_shape = np.min([masks.shape, intensity_img.shape[:2]], axis=0)
+                             masks = masks[:min_shape[0], :min_shape[1]]
+                             intensity_img = intensity_img[:min_shape[0], :min_shape[1]]
                         mask_list = [masks]
                         intensity_list = [intensity_img]
                     for i, (mask, intensity_image) in enumerate(zip(mask_list, intensity_list)):
                         props = regionprops_table(
                             mask,
                             intensity_image=intensity_image.compute(),  # Ensure intensity image is computed
-                            properties=PROPERTIES_MINIMAL
+                            properties=REGIONPROPS_FOR_TABLE
                         )
                         df = DataFrame(props)
                         df['file'] = os.path.basename(file_path)
                         df['scene'] = scene
                         df['frame'] = i
+                        df['channel names'] = str(img.channel_names)
+                        df['x_voxel_size'] = img.physical_pixel_sizes.X
+                        df['y_voxel_size'] = img.physical_pixel_sizes.Y
                         all_props.append(df)
                     props_df = concat(all_props, ignore_index=True)
                 except Exception as e:
@@ -516,30 +582,29 @@ def process_files_multichannel_2(
             # Save regionprops
             if props_df is not None:
                 try:
-                    props_df.to_csv(os.path.join(savedir, f"regionprops_{base}.csv"), index=False)
-                    print(f"Regionprops saved to {os.path.join(savedir, f'regionprops_{base}.csv')}")
+                    reg_filename = base
+                    #Check if it exists
+                    inx = 1
+                    while os.path.exists(os.path.join(savedir, f"{reg_filename}.csv")):
+                        reg_filename = f"{base}_{inx}"
+                        inx += 1
+                    props_df.to_csv(os.path.join(savedir, f"{reg_filename}.csv"), index=False)
+                    print(f"Regionprops saved to {os.path.join(savedir, f'{reg_filename}.csv')}")
                 except Exception as e:
                     print(f"Error occurred while saving regionprops: {e}")
+            # Save intensity images
+            if subset == slice(None):
+                # Move channel axis to the beginning
+                if intensity_img.ndim > 2:
+                    intensity_img = np.moveaxis(intensity_img, -1, 0)
+                np.save(os.path.join(savedir, f"intensity_{base}.npy"), intensity_img)
+            else:
+                # Move channel axis to the beginning for each image in the list
+                intensity_list = [np.moveaxis(img, -1, 0).squeeze() for img in intensity_list]
+                np.save(os.path.join(savedir, f"intensity_{base}.npy"), intensity_list)
         
-        if subset == slice(None):
-            # Move channel axis to the beginning
-            intensity_img = np.moveaxis(intensity_img, -1, 0)
-            np.save(os.path.join(savedir, f"intensity_{base}.npy"), intensity_img)
-        else:
-            # Move channel axis to the beginning for each image in the list
-            intensity_list = [np.moveaxis(img, -1, 0).squeeze() for img in intensity_list]
-            np.save(os.path.join(savedir, f"intensity_{base}.npy"), intensity_list)
 
-@timeit
-def restore(
-    image
-):
-    """ Applies noise removal and background extraction on image
-    Args:
-        image (np.ndarray): image to be processed
-    Returns:
-        restored (np.ndarray): restored image
-    """
+
 
 if __name__ == "__main__":
 
@@ -581,7 +646,7 @@ if __name__ == "__main__":
     root.destroy()  # Destroy the root window after getting inputs
     # Process the files
     process_files_multichannel_2(files, model, model_diameter, savedir, savefix=savefix, 
-                                 get_regionprops=get_regionprops, channels=[0, 1], 
-                                 subset=slice(None), chunksize=[10,10])  
+                                 get_regionprops=get_regionprops, segment_channels=[1,0], intensity_channels=[0,1], 
+                                 subset=slice(None), chunksize=[1,1], scene_identifiers=["WT processed"])  
     # endregion
     #

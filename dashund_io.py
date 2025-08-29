@@ -6,6 +6,18 @@ import xarray as xr
 import dask.array as da
 from aicsimageio import AICSImage, imread
 
+# Class that extends AICSImage to add functions to output data compatible with cellpose
+class dash_AICSImage(AICSImage):
+    def __init__(self, image, reader = None, reconstruct_mosaic = True, fs_kwargs = ..., **kwargs):
+        super().__init__(image, reader, reconstruct_mosaic, fs_kwargs, **kwargs)  
+    
+    def to_cellpose_format(self):
+        """
+        Convert the AICSImage instance to a format compatible with Cellpose.
+        """
+        # Implement the conversion logic here
+        pass
+
 def read_lif_to_xarray_with_metadata(file_path, dims=None, channel_names=None, dask=False):
     """
     Reads a Leica .lif file and returns a a list of xarray.DataArray.
@@ -294,10 +306,10 @@ if __name__=="__main__":
         print("Data saved to Zarr files in:", savedir)
 
     def test_read_aicsimage():
-        import napari
+        #import napari
         paths = filedialog.askopenfilenames(title="Select files")
-        savedir = filedialog.askdirectory(title="Select save directory")
-        viewer = napari.Viewer()
+        #savedir = filedialog.askdirectory(title="Select save directory")
+        #viewer = napari.Viewer()
         for path in paths:
             try:
                 image = AICSImage(path)
@@ -305,8 +317,8 @@ if __name__=="__main__":
                 if data is None:
                     messagebox.showerror("Error", f"Failed to read file: {path}")
                     continue
-                viewer.add_image(data, name=os.path.basename(path), channel_axis=0)
-                napari.run()
+                #viewer.add_image(data, name=os.path.basename(path), channel_axis=0)
+                #napari.run()
             except Exception as e:
                 print(f"Error reading {path}: {e}")
             
