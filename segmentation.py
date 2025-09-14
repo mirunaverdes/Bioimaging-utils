@@ -13,6 +13,7 @@ import time
 import nd2
 import tifffile
 from skimage.measure import regionprops_table, label
+from skimage.segmentation import clear_border
 from skimage.exposure import rescale_intensity
 from skimage.util import dtype_limits
 from skimage.filters import gaussian, median
@@ -21,7 +22,7 @@ from tqdm import tqdm
 from readlif.reader import LifFile  
 import xarray as xr
 from aicsimageio import AICSImage
-from utils import crop_large_image, stitch_images, convert_to_minimal_format
+from utils import crop_large_image, stitch_images, convert_to_minimal_format, namefile, find_channel_axis
 #from skimage.restoration import gaussian_denoise, estimate_sigma
 PROPERTIES_ALL = ('label', 'area', 'perimeter', 'centroid', 'intensity_mean', 'intensity_min', 'intensity_max', 'intensity_std','bbox', 'eccentricity', 'solidity', 'orientation', 'major_axis_length', 'minor_axis_length')
 PROPERTIES_MINIMAL = ('label', 'area', 'perimeter', 'centroid', 'intensity_mean', 'intensity_min', 'intensity_max', 'intensity_std')
@@ -65,6 +66,381 @@ REGIONPROPS_FOR_TABLE = (
     #"moments_weighted_hu",
     #"moments_weighted_normalized",
 )
+def calculate_regionprops(masks, intensity_images, file_path, scene, spacing=(1, 1), 
+                         channel_names=None, physical_pixel_sizes=None):
+    """
+    Calculate region properties for masks with intensity images.
+    
+    Args:
+        masks (np.ndarray or list): 2D/3D array of segmentation masks or list of 2D masks
+        intensity_images (list or np.ndarray): List of intensity images or single intensity image
+        file_path (str): Path to the original file
+        scene (str): Scene identifier
+        spacing (tuple): Physical pixel spacing (Y, X)
+        channel_names (list): List of channel names used for segmentation
+        physical_pixel_sizes (object): Object containing X, Y pixel sizes
+        
+    Returns:
+        pd.DataFrame: DataFrame containing region properties, or None if error occurred
+    """
+    from pandas import DataFrame, concat
+    from skimage.measure import regionprops_table
+    import numpy as np
+    import os
+    
+    all_props = []
+    physical_units = True
+    
+    # Define properties based on whether we have intensity data
+    MORPHOLOGICAL_PROPS = (
+        "label", "area", "bbox", "bbox_area", "centroid", "convex_area",
+        "eccentricity", "equivalent_diameter_area", "euler_number", "extent",
+        "feret_diameter_max", "filled_area", "inertia_tensor", "inertia_tensor_eigvals",
+        "local_centroid", "major_axis_length", "minor_axis_length",
+        "orientation", "perimeter", "perimeter_crofton", "solidity",
+    )
+    
+    INTENSITY_PROPS = (
+        "max_intensity", "mean_intensity", "min_intensity",
+    )
+    
+    try:
+        # Validate spacing
+        if np.isnan(spacing).any() or np.any(np.array(spacing) <= 0) or spacing[0] is None or spacing[1] is None:
+            print(f"Warning: Invalid spacing values {spacing}. Setting spacing to (1, 1).")
+            spacing = (1, 1)
+            physical_units = False
+    except Exception as e:
+        print(f"Error occurred while validating spacing: {e}")
+        spacing = (1, 1)
+        physical_units = False
+    
+    try:
+        # Handle different mask formats - FIX HERE
+        if isinstance(masks, list):
+            # Already a list of 2D masks
+            mask_list = masks
+        elif hasattr(masks, 'ndim'):
+            if masks.ndim == 3:
+                # 3D array: convert to list of 2D masks
+                mask_list = [masks[i] for i in range(masks.shape[0])]
+            elif masks.ndim == 2:
+                # Single 2D mask
+                mask_list = [masks]
+            else:
+                raise ValueError(f"Unexpected mask dimensions: {masks.ndim}")
+        else:
+            raise ValueError(f"Masks must be numpy array or list, got {type(masks)}")
+        
+        # Handle intensity images
+        if isinstance(intensity_images, list):
+            intensity_list = intensity_images
+        elif intensity_images is None:
+            intensity_list = [None] * len(mask_list)
+        elif hasattr(intensity_images, 'ndim'):
+            if intensity_images.ndim == 4:
+                # 4D array (T, C, Y, X): convert to list
+                intensity_list = [intensity_images[i] for i in range(intensity_images.shape[0])]
+            elif intensity_images.ndim == 3:
+                # 3D array: could be (C, Y, X) or (T, Y, X)
+                # Assume single timepoint with channels
+                intensity_list = [intensity_images]
+            elif intensity_images.ndim == 2:
+                # Single 2D intensity image
+                intensity_list = [intensity_images]
+            else:
+                raise ValueError(f"Unexpected intensity image dimensions: {intensity_images.ndim}")
+        else:
+            intensity_list = [intensity_images]
+        
+        # Ensure we have matching numbers of masks and intensity images
+        if len(mask_list) != len(intensity_list):
+            print(f"Warning: Number of masks ({len(mask_list)}) doesn't match number of intensity images ({len(intensity_list)})")
+            min_length = min(len(mask_list), len(intensity_list))
+            mask_list = mask_list[:min_length]
+            intensity_list = intensity_list[:min_length]
+        
+        # Process each mask-intensity pair
+        for i, (mask, intensity_img) in enumerate(zip(mask_list, intensity_list)):
+            # Handle shape mismatches
+            if intensity_img is not None:
+                if intensity_img.ndim == 2 and mask.shape != intensity_img.shape:
+                    print(f"Warning: Mask and intensity image have different shapes: {mask.shape} vs {intensity_img.shape}")
+                    print("Cropping to minimum common dimensions")
+                    min_shape = np.minimum(mask.shape, intensity_img.shape)
+                    mask = mask[:min_shape[0], :min_shape[1]]
+                    intensity_img = intensity_img[:min_shape[0], :min_shape[1]]
+                elif intensity_img.ndim == 3 and mask.shape != intensity_img.shape[:2]:
+                    print(f"Warning: Mask and multi-channel intensity image have different shapes: {mask.shape} vs {intensity_img.shape[:2]}")
+                    print("Cropping to minimum common dimensions")
+                    min_shape = np.minimum(mask.shape, intensity_img.shape[:2])
+                    mask = mask[:min_shape[0], :min_shape[1]]
+                    intensity_img = intensity_img[:min_shape[0], :min_shape[1]]
+            
+            # Select properties based on whether intensity image is available
+            if intensity_img is not None:
+                properties_to_use = MORPHOLOGICAL_PROPS + INTENSITY_PROPS
+            else:
+                properties_to_use = MORPHOLOGICAL_PROPS
+                print(f"Warning: No intensity image for frame {i}, calculating morphological properties only")
+            
+            # Calculate regionprops
+            props = regionprops_table(
+                mask,
+                intensity_image=intensity_img,  # Can be None
+                properties=properties_to_use,
+                spacing=spacing
+            )
+            
+            # Convert to DataFrame and add metadata
+            df = DataFrame(props)
+            df['file'] = os.path.basename(file_path)
+            df['scene'] = scene
+            df['frame'] = i
+            df['channel_names'] = str(channel_names) if channel_names else "Unknown"
+            df['has_intensity_data'] = intensity_img is not None
+            
+            # Add pixel size information
+            if physical_pixel_sizes:
+                df['x_voxel_size'] = physical_pixel_sizes.X
+                df['y_voxel_size'] = physical_pixel_sizes.Y
+            else:
+                df['x_voxel_size'] = spacing[1]
+                df['y_voxel_size'] = spacing[0]
+            
+            df['physical_units_applied'] = physical_units
+            
+            all_props.append(df)
+        
+        # Concatenate all properties
+        if all_props:
+            props_df = concat(all_props, ignore_index=True)
+            return props_df
+        else:
+            print("No region properties calculated")
+            return None
+            
+    except Exception as e:
+        print(f"Error occurred while calculating regionprops: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+
+def save_regionprops(props_df, savedir, base_filename, scene=None):
+    """
+    Save region properties DataFrame to CSV file.
+    
+    Args:
+        props_df (pd.DataFrame): DataFrame containing region properties
+        savedir (str): Directory to save the CSV file
+        base_filename (str): Base filename (without extension)
+        scene (str, optional): Scene identifier to append to filename
+        
+    Returns:
+        str: Path to saved file, or None if error occurred
+    """
+    import os
+    
+    if props_df is None or props_df.empty:
+        print("No region properties to save")
+        return None
+    
+    try:
+        # Create filename
+        if scene:
+            reg_filename = f"{base_filename}_{scene}"
+        else:
+            reg_filename = base_filename
+        
+        # Check if file exists and increment if necessary
+        counter = 1
+        original_filename = reg_filename
+        while os.path.exists(os.path.join(savedir, f"{reg_filename}.csv")):
+            reg_filename = f"{original_filename}_{counter}"
+            counter += 1
+        
+        # Save to CSV
+        filepath = os.path.join(savedir, f"{reg_filename}.csv")
+        props_df.to_csv(filepath, index=False)
+        print(f"Region properties saved to {filepath}")
+        return filepath
+        
+    except Exception as e:
+        print(f"Error occurred while saving regionprops: {e}")
+        return None
+
+    
+def prepare_intensity_list(intensity_data, masks, chunksize, subset):
+    """
+    Prepare intensity images for regionprops calculation.
+    
+    Returns:
+        list: List of intensity images with channels last (Y, X, C) or [None] if no intensity data
+    """
+    if chunksize != [1, 1] and subset != slice(None):
+        # Chunked processing
+        intensity_list = crop_large_image(intensity_data, n_segments_x=chunksize[0], n_segments_y=chunksize[1])
+        # Find channel axis
+        channel_axis = find_channel_axis(intensity_list[0])
+        # Move channels to last dimension
+        intensity_list = [np.moveaxis(img, channel_axis, -1) for img in intensity_list]
+        return intensity_list[subset]
+    
+    if intensity_data is None:
+        # No intensity data available; raise warning and return None
+        print("Warning: No intensity data available for regionprops calculation.")
+        return None
+        
+    
+    # Handle intensity data
+    try:
+        if intensity_data.ndim == 4:  # (T, C, Y, X)
+            channel_axis = find_channel_axis(intensity_data[0])
+            intensity_list = [np.moveaxis(intensity_data[t], channel_axis, -1) for t in range(intensity_data.shape[0])]
+        elif intensity_data.ndim == 3:  # (C, Y, X) - single timepoint
+            intensity_list = [np.moveaxis(intensity_data, 0, -1)]
+        else:
+            print(f"Warning: Unexpected intensity data shape: {intensity_data.shape}")
+            intensity_list = None
+
+        return intensity_list
+        
+    except Exception as e:
+        print(f"Error preparing intensity list: {e}")
+        # Fallback to None
+        return None
+    
+def prepare_masks_list(masks, chunksize, subset):
+    """
+    Prepare masks for regionprops calculation.
+    
+    Returns:
+        list: List of masks
+    """
+    if masks is None:
+        print("Warning: No masks available for regionprops calculation.")
+        return None
+
+    if chunksize != [1, 1] and subset != slice(None):
+        # Chunked processing
+        masks_list = crop_large_image(masks, n_segments_x=chunksize[0], n_segments_y=chunksize[1])
+        return masks_list[subset]
+    
+    if masks.ndim == 3:  # (T, Y, X)
+        return [masks[t] for t in range(masks.shape[0])]
+    elif masks.ndim == 2:  # (Y, X) - single mask
+        return [masks]
+    else:
+        print(f"Warning: Unexpected masks shape: {masks.shape}")
+        return None
+
+def check_masks_intensity_shapes(masks_list, intensity_list):
+    """
+    Check if the shapes of masks and intensity images match and try to fix if not.
+    
+    Args:
+        masks_list (list): List of mask images.
+        intensity_list (list): List of intensity images (channels last).
+
+    Returns:
+        tuple: (bool, fixed_masks_list, fixed_intensity_list) - 
+               True if shapes match/were fixed, False otherwise.
+               Returns the potentially fixed lists.
+    """
+    if masks_list is None or intensity_list is None:
+        print("Warning: One or both lists are None.")
+        return False, masks_list, intensity_list
+
+    if len(masks_list) != len(intensity_list):
+        print(f"Warning: Lengths of masks ({len(masks_list)}) and intensity ({len(intensity_list)}) lists do not match.")
+        # Try to fix by truncating to minimum length
+        min_length = min(len(masks_list), len(intensity_list))
+        masks_list = masks_list[:min_length]
+        intensity_list = intensity_list[:min_length]
+        print(f"Truncated both lists to length {min_length}")
+    
+    fixed_masks = []
+    fixed_intensity = []
+    all_shapes_match = True
+    
+    for i, (mask, intensity) in enumerate(zip(masks_list, intensity_list)):
+        if intensity is None:
+            # If intensity is None, just keep the mask as is
+            fixed_masks.append(mask)
+            fixed_intensity.append(intensity)
+            continue
+            
+        # Get expected shape from intensity image
+        if intensity.ndim == 3:  # (Y, X, C) - channels last
+            expected_shape = intensity.shape[:2]  # (Y, X)
+        elif intensity.ndim == 2:  # (Y, X) - single channel
+            expected_shape = intensity.shape
+        else:
+            print(f"Warning: Unexpected intensity image dimensions at index {i}: {intensity.shape}")
+            fixed_masks.append(mask)
+            fixed_intensity.append(intensity)
+            all_shapes_match = False
+            continue
+        
+        # Check if mask shape matches expected shape
+        if mask.shape != expected_shape:
+            print(f"Warning: Shape mismatch at index {i}: mask {mask.shape} vs expected {expected_shape}")
+            
+            # Try to fix by cropping to minimum common dimensions
+            try:
+                min_shape = tuple(min(m, e) for m, e in zip(mask.shape, expected_shape))
+                
+                # Crop mask
+                fixed_mask = mask[:min_shape[0], :min_shape[1]]
+                
+                # Crop intensity image
+                if intensity.ndim == 3:
+                    fixed_intensity_img = intensity[:min_shape[0], :min_shape[1], :]
+                else:
+                    fixed_intensity_img = intensity[:min_shape[0], :min_shape[1]]
+                
+                print(f"Fixed shapes at index {i}: mask {mask.shape} -> {fixed_mask.shape}, "
+                      f"intensity {intensity.shape} -> {fixed_intensity_img.shape}")
+                
+                fixed_masks.append(fixed_mask)
+                fixed_intensity.append(fixed_intensity_img)
+                
+            except Exception as e:
+                print(f"Failed to fix shapes at index {i}: {e}")
+                # Keep original shapes if fixing fails
+                fixed_masks.append(mask)
+                fixed_intensity.append(intensity)
+                all_shapes_match = False
+        else:
+            # Shapes match, keep as is
+            fixed_masks.append(mask)
+            fixed_intensity.append(intensity)
+    
+    return all_shapes_match, fixed_masks, fixed_intensity
+
+
+def check_and_fix_shapes(masks_list, intensity_list):
+    """
+    Wrapper function that checks and fixes shapes, returning the corrected lists.
+    
+    Args:
+        masks_list (list): List of mask images
+        intensity_list (list): List of intensity images
+        
+    Returns:
+        tuple: (masks_list, intensity_list) - corrected lists
+    """
+    shapes_ok, fixed_masks, fixed_intensity = check_masks_intensity_shapes(masks_list, intensity_list)
+    
+    if not shapes_ok:
+        print("Some shape mismatches were detected and attempted to be fixed.")
+    else:
+        print("All mask and intensity image shapes are compatible.")
+    
+    return fixed_masks, fixed_intensity
+
+
 def timeit(func):
     def wrapper(*args, **kwargs):
         start = time.perf_counter()
@@ -74,397 +450,28 @@ def timeit(func):
         return result
     return wrapper
 
-def read_lif_to_xarray_with_metadata(file_path):
-    """
-    Reads a Leica .lif file and returns an xarray.DataArray with dimension names
-    inferred from the metadata (not assumed).
-    """
-    with LifFile(file_path) as lif:
-        positions = []
-        dims_list = []
-        for series in lif.series:
-            t_images = []
-            for image in series.images:
-                arr = image.asarray()
-                # Try to get dimension names from image metadata
-                # readlif.reader does not provide explicit names, but you can infer:
-                # If arr.ndim == 4: (C, Z, Y, X) or (C, T, Y, X)
-                # If arr.ndim == 3: (C, Y, X)
-                # If arr.ndim == 2: (Y, X)
-                # You may need to check image.dims or image.shape if available
-                if hasattr(image, 'dims'):
-                    dims = image.dims  # e.g. ('C', 'Z', 'Y', 'X')
-                else:
-                    # Fallback: guess based on shape
-                    if arr.ndim == 4:
-                        dims = ('C', 'Z', 'Y', 'X')
-                    elif arr.ndim == 3:
-                        dims = ('C', 'Y', 'X')
-                    elif arr.ndim == 2:
-                        dims = ('Y', 'X')
-                    else:
-                        raise ValueError("Unknown dimension order for LIF image.")
-                dims_list.append(dims)
-                t_images.append(arr)
-            if t_images:
-                t_stack = np.stack(t_images, axis=0)  # stack along new T axis
-                positions.append(t_stack)
-        if not positions:
-            raise ValueError("No images found in lif file.")
-        data = np.stack(positions, axis=0)  # stack positions
-        # Compose dimension names: add 'P' (position) and 'T' (time) if needed
-        # Use the first dims as reference
-        base_dims = dims_list[0]
-        dims = ('P', 'T') + base_dims if len(data.shape) == len(base_dims) + 2 else ('P',) + base_dims
-        coords = {d: np.arange(s) for d, s in zip(dims, data.shape)}
-        da = xr.DataArray(data, dims=dims, coords=coords)
-        return da
-
-def read_tiff_to_xarray_with_metadata(file_path):
-    """
-    Reads a TIFF file and returns an xarray.DataArray with dimension names
-    inferred from the metadata (not assumed).
-    """
-    with tifffile.TiffFile(file_path) as tif:
-        series = tif.series[0]
-        arr = series.asarray()
-        # Get axes string from metadata, e.g. 'TCYX', 'CZYX', etc.
-        axes = getattr(series, 'axes', None)
-        if axes is None:
-            # Fallback: guess based on ndim
-            if arr.ndim == 5:
-                axes = 'PTCYX'
-            elif arr.ndim == 4:
-                axes = 'TCYX'
-            elif arr.ndim == 3:
-                axes = 'CYX'
-            elif arr.ndim == 2:
-                axes = 'YX'
-            else:
-                raise ValueError("Unknown TIFF axes order.")
-        dims = tuple(axes)
-        coords = {d: np.arange(s) for d, s in zip(dims, arr.shape)}
-        da = xr.DataArray(arr, dims=dims, coords=coords)
-        return da
-
-def read_any_format_to_numpy_multidim(file_path):
-    """
-    Reads images or timelapses from a file and converts them to a lists of NumPy arrays that 
-    can be processed by Cellpose.
-
-    Args:
-        file_path (str): The path to the image or video file.
-
-    Returns:
-        list of lists of np.ndarray: The timelapse as a list of NumPy arrays, 
-        nested in a list to allow for multiple positions.
-    """
-    if not os.path.exists(file_path):
-        raise FileNotFoundError(f"File not found: {file_path}")
-
-    if file_path.endswith('.avi'):
-        return read_avi_to_grayscale_numpy(file_path)
-    elif file_path.endswith('.nd2'):
-        image = nd2.imread(file_path, xarray=True, dask=True)
-        # If there are multiple channels, only take the Trans channel
-        if image.ndim == 2:
-            # If the image is 2D, return it as a list with one element
-            return [[np.array(image)]]
-        elif image.ndim == 3:
-            if 'C' in image.dims:
-                return [[np.array(image)]]
-            elif 'P' in image.dims:
-                # If the image is 3D with a 'P' dimension, convert it to a list of 2D arrays
-                return [[np.array(image.sel({'P':p})) for p in image.coords['P']]]
-            elif 'T' in image.dims:
-                # If the image has a time dimension, convert it to a list of 2D arrays
-                return [[np.array(image.sel({'T':t})) for t in image.coords['T']]]
-        elif image.ndim == 4:
-            if 'P' in image.dims and 'T' in image.dims:
-                # go through all positions and time frames
-                #return [[np.array(image.sel({'P':p, 'T':t})) for t in image.coords['T']] for p in image.coords['P']]
-                image_sets = []
-                for p in image.coords['P']:
-                    # Load all time points for this position at once (still chunked)
-                    arr = np.array(image.sel({'P': p}))
-                    # arr shape: (T, Y, X)
-                    time_slices = [arr[t] for t in range(arr.shape[0])]
-                    image_sets.append(time_slices)
-                return image_sets
-    elif file_path.endswith('.lif'):
-        with LifFile(file_path) as lif:
-            images = []
-            for series in lif.series:
-                for image in series.images:
-                    images.append(image.asarray())
-            return [images]
-    elif file_path.endswith(('.tif', '.tiff')):
-        with tifffile.TiffFile(file_path) as tif:
-            images = [page.asarray() for page in tif.pages]
-        return [images]
-    elif file_path.endswith('.npy'):
-        return [list(np.load(file_path))]  # Load the .npy file and return as a list
-    else:
-        raise ValueError("Unsupported file format.")
-
-def read_any_format_to_numpy(file_path):
-    """
-    Reads an image or video file and converts it to a NumPy array.
-
-    Args:
-        file_path (str): The path to the image or video file.
-
-    Returns:
-        list of np.ndarray: The image or video frames as a list of NumPy arrays.
-    """
-    if file_path.endswith('.avi'):
-        return read_avi_to_grayscale_numpy(file_path)
-    elif file_path.endswith('.nd2'):
-        image = nd2.imread(file_path, xarray=True, dask=True)
-        # If there are multiple channels, only take the Trans channel
-        if 'C' in image.dims:
-            image = image.sel({'C':'Trans'}).squeeze()
-        if image.ndim == 2:
-            # If the image is 2D, return it as a list with one element
-            return [np.array(image)]
-        elif 'P' in image.dims and image.ndim == 3:
-            # If the image is 3D with a 'P' dimension, convert it to a list of 2D arrays
-            return [np.array(image.sel({'P':p})) for p in image.coords['P']]
-        elif 'T' in image.dims and image.ndim == 3:
-            # If the image has a time dimension, convert it to a list of 2D arrays
-            return [np.array(image.sel({'T':t})) for t in image.coords['T']]
-        elif image.ndim == 4 and 'P' in image.dims and 'T' in image.dims:
-            print("Unsupported ND2 file format with positions and timelapse not yet supported.")
-            print("Processing only the first position and time frame.")
-            return [np.array(image.isel(P=0, T=0))]
-    # elif file_path.endswith('.lif'):
-    #     with LifFile(file_path) as lif:
-    #         images = []
-    #         for series in lif.series:
-    #             for image in series.images:
-    #                 images.append(image.asarray())
-    #         return images    
-    elif file_path.endswith(('.tif', '.tiff')):
-        with tifffile.TiffFile(file_path) as tif:
-            images = [page.asarray() for page in tif.pages]
-        return images
-    elif file_path.endswith('.npy'):
-        return list(np.load(file_path))  # Load the .npy file and return as a list
-    else:
-        raise ValueError("Unsupported file format.")
-
-def read_avi_to_grayscale_numpy(video_path):
-
-    """
-    Reads an AVI video file, converts its frames to grayscale,
-    and returns a list of these grayscale frames as NumPy ndarrays.
-
-    Args:
-        video_path (str): The path to the .avi video file.
-
-    Returns:
-        list: A list of NumPy ndarrays, where each ndarray represents a
-              grayscale frame. Returns an empty list if the video
-              cannot be opened or read.
-    """
-    frames_list = []
-
-    # 1. Open the video file
-    cap = cv2.VideoCapture(video_path)
-
-    # 2. Check if the video opened successfully
-    if not cap.isOpened():
-        print(f"Error: Could not open video file: {video_path}")
-        return frames_list
-
-    # 3. Read frames in a loop
-    while True:
-        ret, frame = cap.read()
-
-        if not ret:
-            # End of video or error reading frame
-            break
-
-        # Convert the frame to grayscale
-        grayscale_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-
-        # The 'grayscale_frame' is a NumPy ndarray
-        frames_list.append(grayscale_frame)
-
-
-    # 4. Release the VideoCapture object
-    cap.release()
-
-
-    return frames_list
-
-
-
-def process_files(files, model, model_diameter, savedir, get_regionprops=False):
-    """
-    Processes a list of files, reads images, segments them using the Cellpose model,
-    and saves the masks and region properties to the specified directory.
-    Args:
-        files (list): List of file paths to process.
-        model (CellposeModel): The Cellpose model to use for segmentation.
-        model_diameter (int): The diameter of the cells for the model.
-        savedir (str): Directory where the masks and region properties will be saved.
-        get_regionprops (bool): Whether to compute and save region properties.
-    """
-    # Process the selected files
-    # region
-    # Loop through the selected files and process each one
-    start_all = time.perf_counter()  # Start the timer for all files
-    for i, file_path in enumerate(tqdm(files, desc="Processing files", unit="file")):
-        # Read images. segment and save masks
-        image_sets = read_any_format_to_numpy_multidim(file_path)
-        for j, image_list in enumerate(tqdm(image_sets, desc=f"Processing image sets", unit="image")):
-            ## Perform segmentation in parallel on all images in the list
-            masks, flows, styles = model.eval(image_list, diameter=model_diameter)
-            #image=np.array(image_list).astype(np.uint8).squeeze()
-            if np.all(np.array(masks)< 255):
-                # If the masks are not in uint8 format, convert them to uint8
-                masks = np.array(masks).astype(np.uint8)
-            else:
-                masks = np.array(masks)
-            # Generate the file name without the extension
-            file = os.path.basename(file_path).split('.')[0] + f"_{j+1}"  # Append the image set index to the file name
-            # Scale the image to uint8 if it is not already using skimage
-            image = np.array(image_list).squeeze()
-            if image.dtype != np.uint8:
-                image = rescale_intensity(image, in_range='dtype', out_range=(0, 255)).astype(np.uint8)
-     
-            if get_regionprops:
-                print("Getting regionprops for the masks...")
-                # Get regionprops for the masks 
-                all_props = []
-                for i, mask in enumerate(masks):
-                    props = regionprops_table(mask, intensity_image=image,properties=PROPERTIES_MINIMAL)
-                    df = DataFrame(props)
-                    df['frame'] = i  # or 'z' for z-stack
-                    all_props.append(df)
-
-            props_df = concat(all_props, ignore_index=True)
-            # Save the regionprops to a CSV file
-            props_df.to_csv(os.path.join(savedir, f"regionprops_{file}.csv"), index=False)
-            print(f"Regionprops saved to {os.path.join(savedir, f'regionprops_{file}.csv')}")
-            # Save the masks to a file or process them as needed
-            np.save(os.path.join(savedir, f"masks_d-{model_diameter}_{file}.npy"), masks)
-            filename = f"masks_d-{model_diameter}_{file}.npy"
-            print(f"Masks and image.npy save path: {os.path.join(savedir, filename)}")   
-        np.save(os.path.join(savedir, f"image_{file}.npy"),image)
-    endall = time.perf_counter()  # End the timer for all files
-    print(f"Total time for all files: {endall - start_all:.2f} seconds")
-    # endregion
-
-@timeit
-def process_files_multichannel(files, model, model_diameter, savedir, savefix, get_regionprops=False, channels=[2, 0]):
-    """
-    Processes a list of files with multiple channels, segments them using the Cellpose model,
-    and saves the masks and region properties to the specified directory.
-    Args:
-        files (list): List of file paths to process.
-        model (CellposeModel): The Cellpose model to use for segmentation.
-        model_diameter (int): The diameter of the cells for the model.
-        savedir (str): Directory where the masks and region properties will be saved.
-        savefix (str): Suffix to append to the saved file names.
-        get_regionprops (bool): Whether to compute and save region properties.
-        channels (list): List of channel indices to process. First index is the channel to segment, second onward index is the channel to use for regionprops intensity metrics.
-    """
-    # Process the selected files
-    # region
-    # Loop through the selected files, read imagges and structure them for Cellpose       
-    for i, file_path in enumerate(tqdm(files, desc="Reading files", unit="file")):
-        # Read images. segment and save masks
-        image_sets= read_any_format_to_numpy_multidim(file_path)
-        if i == 0:
-            # Check number of channels
-            num_channels = len(image_sets[0])  # Assuming all image sets have the same number of channels
-            channel_sets = [[] for _ in range(num_channels)]
-        for j in range(num_channels):
-            channel_sets[j].append(image_sets[0][j])  # Append each channel to the respective list
-
-    
-    ## Perform segmentation in parallel on all images in the list
-    masks, _, _ = model.eval(channel_sets[channels[0]], diameter=model_diameter, cellprob_threshold=-0.1, niter=400)
-    
-    # Convert masks to minimal data type
-    if np.all(np.array(masks)< 255):
-        # If the masks are not in uint8 format, convert them to uint8
-        masks = np.array(masks).astype(np.uint8)
-    elif np.all(np.array(masks)< 65535):
-        # If the masks are not in uint16 format, convert them to uint16
-        masks = np.array(masks).astype(np.uint16)
-    elif np.all(np.array(masks)< 4294967295):
-        # If the masks are not in uint32 format, convert them to uint32
-        masks = np.array(masks).astype(np.uint32)
-    else:
-        # If the masks are not in a standard format, convert them to a standard format
-        masks = np.array(masks)
-    
-    # # Scale the image to uint8 if it is not already using skimage
-    # image = np.array(image_list).squeeze()
-    # if image.dtype != np.uint8:
-    #     image = rescale_intensity(image, in_range='dtype', out_range=(0, 255)).astype(np.uint8)
-
-    if get_regionprops:
-        # Get regionprops for the masks
-        all_props = []
-        try:
-            for i, mask in enumerate(tqdm(masks,desc="Calculating regionprops", unit="mask")):
-                props = regionprops_table(mask, intensity_image=channel_sets[channels[1]][i],properties=PROPERTIES_MINIMAL)
-                df = DataFrame(props)
-                df['file'] = os.path.basename(files[i])  
-                all_props.append(df)
-            props_df = concat(all_props, ignore_index=True)
-        except Exception as e:
-            print(f"Error occurred while calculating regionprops: {e}")
-            props_df = None
-
-    # Saving data part
-    # Generate the file name without the extension
-    file = savefix if savefix else os.path.basename(files[0]).split('.')[0]  # Use the first file name as a base
-    # Save the masks to a file or process them as needed
-    filename = f"masks_d-{model_diameter}_{file}.npy"
-    np.save(os.path.join(savedir, filename), masks)
-    print(f"Masks and image.npy save path: {os.path.join(savedir, filename)}")
-    # Save the images as a numpy array stack
-    image = np.array(channel_sets[channels[0]]).squeeze()
-    intensity = np.array(channel_sets[channels[1]]).squeeze()
-    np.save(os.path.join(savedir, f"image_{file}.npy"), image)
-    np.save(os.path.join(savedir, f"intensity_{file}.npy"), intensity)
-
-    try:
-        if props_df is not None:
-            # Save the regionprops to a CSV file
-            props_df.to_csv(os.path.join(savedir, f"regionprops_{file}.csv"), index=False)
-            print(f"Regionprops saved to {os.path.join(savedir, f'regionprops_{file}.csv')}")
-    except Exception as e:
-        print(f"Error occurred while saving regionprops: {e}")
-
-        # endregion
 
 @timeit
 def process_files_multichannel_2(
-    files, model, model_diameter, savedir, savefix,
-    get_regionprops=True, segment_channels=[1, 0], intensity_channels=None, subset=slice(None),
-    chunksize=[1, 1], scene_identifiers=None
+    files, model, model_diameter, savedir,
+    get_regionprops=True, segment_channels=[1, 0], intensity_channels=None, 
+    subset=slice(None), chunksize=[1, 1], scene_identifiers=None, time_subset=slice(None)
 ):
     """
-    Processes a list of files with multiple channels using AICSImage, segments them using the Cellpose model,
+    Processes a list of image files (2D multichannel timelapses) readable with AICSImage, segments them using the Cellpose model,
     and saves the masks and region properties to the specified directory.
     Args:
         files (list): List of file paths to process.
         model (CellposeModel): The Cellpose model to use for segmentation.
         model_diameter (int): The diameter of the cells for the model.
         savedir (str): Directory where the masks and region properties will be saved.
-        savefix (str): Suffix to append to the saved file names.
         get_regionprops (bool): Whether to compute and save region properties.
         segment_channels (list): List of channel indices to use for segmentation. First index is the channel to segment, the second is optional channel with nuclei.
         intensity_channels (list): List of channel indices to use for regionprops intensity metrics.
         subset (slice): Slice object to select a subset of images from the cropped image list. Is slice(None) by default, which means all images will be processed.
         chunksize (list): List of chunk sizes for processing the images. The first element is the chunk size for the x dimension, the second element is the chunk size for the y dimension.
         scene_identifiers (list): List of scene identifiers to process. If None, all scenes will be processed.
+        time_subset (slice): Slice object to select a subset of time points. Is slice(None) by default, which means all time points will be processed.
     """
     # from pandas import DataFrame, concat
     # import numpy as np
@@ -478,175 +485,595 @@ def process_files_multichannel_2(
             img = AICSImage(file_path)
         except:
             if file_path.endswith(".npy"):
-                data=np.load(file_path)
-            img = AICSImage(data)
+                data = np.load(file_path)
+                img = AICSImage(data)
+        
+        # Check if the image has multiple scenes
+        if len(img.scenes) == 0:
+            print(f"No scenes found in {file_path}. Skipping this file.")
+            continue
+            
         scenes = img.scenes if scene_identifiers is None else [scene for scene in img.scenes if any(s in scene for s in scene_identifiers)]
+        
+        # Initialize list to collect all regionprops from all scenes for this file
+        all_scenes_props = []
+        
         for scene in scenes:
             img.set_scene(scene)
-            # Read segmentation channel (as 2D or 3D if needed)
-            seg_img = img.get_image_dask_data("CYX", C=sorted(segment_channels))
-            # Apply median filter to denoise the segmentation channel
-            #seg_img = median(seg_img)
-            seg_list = crop_large_image(seg_img, n_segments_x = chunksize[0], n_segments_y = chunksize[1])  # Crop the image into smaller patches if needed
-            try:
-                seg_list = seg_list[subset]
-            except Exception as e:
-                print(f"Error occurred while applying subset: {e}")
-            seg_list = [patch.compute() for patch in seg_list]
+            
+            # Create the filepaths for saving
+            base = os.path.basename(file_path).split('.')[0]
+            masks_filepath = namefile(savedir, base, prefix=f"masks-{model_diameter}", suffix=scene, ext="npy")
 
-            #seg_img_np = np.array(seg_img).squeeze()  # shape: (Y, X)
+            # Get ALL channel data at once
+            full_img = img.get_image_data("TCYX")  # Single read
+            
+            # Use views/slices instead of copying
+            seg_data = full_img[:, segment_channels]  # View, not copy
+            intensity_data = full_img[:, intensity_channels] if intensity_channels else None
+            
+            # Convert to list for Cellpose
+            seg_list = [seg_data[t] for t in range(seg_data.shape[0])]  # Views of time points
+            
+            # Only chunk if the image is not a timelapse
+            if chunksize != [1, 1] and len(seg_list) == 1:
+                print(f"Processing image in chunks of size {chunksize}...")
+                seg_list = crop_large_image(seg_data, n_segments_x=chunksize[0], n_segments_y=chunksize[1])
+                try:
+                    seg_list = seg_list[subset]
+                except Exception as e:
+                    print(f"Error occurred while applying subset: {e}")
 
             # Segment
-            masks, _, _ = model.eval(seg_list, channels = segment_channels, diameter=model_diameter, min_size=0)
+            masks, _, _ = model.eval(seg_list, # this can now be a list of 2D or 3D multichannel images
+                                     #channels = segment_channels, 
+                                     diameter=model_diameter)
             
             
-            # Save masks and images
-            base = os.path.splitext(os.path.basename(file_path))[0]
-            if len(base) > 25:
-                base = base[:25]  # Truncate base name to 25 characters if too long
-            base = base + f"_{scene.replace(' ', '_')}"
-            if savefix:
-                base = base + f"_{savefix}"
-            # Create filename
-            filename = f"masks_d-{model_diameter}_{base}.npy"
-            # Check if file already exists
-            if os.path.exists(os.path.join(savedir, filename)):
-                # Rename file by appending a number
-                i = 1
-                while os.path.exists(os.path.join(savedir, f"{i}_{filename}")):
-                    i += 1
-                filename = f"{i}_{filename}"
-
+            # Remove masks touching edges
+            masks = [clear_border(mask) for mask in masks] if isinstance(masks, list) else clear_border(masks)
+           
             # Save masks
-            if subset == slice(None):
-                # If no subset is specified, stitch all masks together
+            if chunksize != [1, 1]:
+                # If no subset is specified, and image was tiled, stitch all masks together
                 masks = stitch_images(masks, n_segments_x=chunksize[0], n_segments_y=chunksize[1])
-                # Relabel masks
+                # Relabel masks to avoid duplicate labels after stitching
                 masks = label(masks)
-                masks = convert_to_minimal_format(masks)  # Convert to minimal format
-                seg_img = stitch_images(seg_list, n_segments_x=chunksize[0], n_segments_y=chunksize[1])
-                # Check seg_img and masks have same shape
-                if seg_img.shape != masks.shape:
-                    print(f"Warning: seg_img and masks have different shapes: {seg_img.shape} vs {masks.shape}")                    
-                np.save(os.path.join(savedir, filename), masks)
-                np.save(os.path.join(savedir, f"image_{base}.npy"), seg_img)
-                print(f"Masks and image.npy save path: {os.path.join(savedir, filename)}")
-            else:
-                # If a subset is specified, save the masks as stack
-                masks = convert_to_minimal_format(masks)  # Convert to minimal format
-                np.save(os.path.join(savedir, filename), masks)
-                np.save(os.path.join(savedir, f"image_{base}.npy"), seg_list)
-                print(f"Masks and image.npy save path: {os.path.join(savedir, filename)}")
             
-            # Get intensity data and save as npy
-            # Read all regionprops channels and stack as last axis
-            intensity_img = img.get_image_dask_data("YXC", C=intensity_channels)  # shape: (Y, X, C)
-            intensity_list = crop_large_image(intensity_img, n_segments_x = chunksize[0], n_segments_y = chunksize[1])  # Crop the image into smaller patches if needed
-            intensity_list = intensity_list[subset]
-            # Regionprops
-            props_df = None
-            if get_regionprops:
-                all_props = []
-                
-                try:
-                    # If masks is 3D (batch), loop; else, just one mask
-                    if masks.ndim == 3:
-                        mask_list = masks
-                    else:
-                        # Check if masks and intensity images have the same shape
-                        if (intensity_img.ndim==2 and masks.shape != intensity_img.shape) or (intensity_img.ndim==3 and masks.shape != intensity_img.shape[:2]):
-                             print(f"Warning: masks and intensity images have different shapes: {masks.shape} vs {intensity_img.shape}. Will overlap by cropping the ends of the images.")
-                             min_shape = np.min([masks.shape, intensity_img.shape[:2]], axis=0)
-                             masks = masks[:min_shape[0], :min_shape[1]]
-                             intensity_img = intensity_img[:min_shape[0], :min_shape[1]]
-                        mask_list = [masks]
-                        intensity_list = [intensity_img]
-                    for i, (mask, intensity_image) in enumerate(zip(mask_list, intensity_list)):
-                        props = regionprops_table(
-                            mask,
-                            intensity_image=intensity_image.compute(),  # Ensure intensity image is computed
-                            properties=REGIONPROPS_FOR_TABLE
-                        )
-                        df = DataFrame(props)
-                        df['file'] = os.path.basename(file_path)
-                        df['scene'] = scene
-                        df['frame'] = i
-                        df['channel names'] = str(img.channel_names)
-                        df['x_voxel_size'] = img.physical_pixel_sizes.X
-                        df['y_voxel_size'] = img.physical_pixel_sizes.Y
-                        all_props.append(df)
-                    props_df = concat(all_props, ignore_index=True)
-                except Exception as e:
-                    print(f"Error occurred while calculating regionprops: {e}")
-                    props_df = None
-            # Save regionprops
-            if props_df is not None:
-                try:
-                    reg_filename = base
-                    #Check if it exists
-                    inx = 1
-                    while os.path.exists(os.path.join(savedir, f"{reg_filename}.csv")):
-                        reg_filename = f"{base}_{inx}"
-                        inx += 1
-                    props_df.to_csv(os.path.join(savedir, f"{reg_filename}.csv"), index=False)
-                    print(f"Regionprops saved to {os.path.join(savedir, f'{reg_filename}.csv')}")
-                except Exception as e:
-                    print(f"Error occurred while saving regionprops: {e}")
-            # Save intensity images
-            if subset == slice(None):
-                # Move channel axis to the beginning
-                if intensity_img.ndim > 2:
-                    intensity_img = np.moveaxis(intensity_img, -1, 0)
-                np.save(os.path.join(savedir, f"intensity_{base}.npy"), intensity_img)
+            masks = convert_to_minimal_format(masks)  # Convert to minimal format  
+            # To fix masks file doesn't save properly- potentially due to file renaming              
+            np.save(masks_filepath, masks) 
+            # Prepare masks for regionprops
+            masks_list = [masks[t] for t in range(masks.shape[0])] if masks.ndim == 3 else [masks]
+            # Prepare intensity images for regionprops
+            if chunksize != [1, 1] and subset != slice(None):
+                intensity_list = crop_large_image(intensity_data, n_segments_x=chunksize[0], n_segments_y=chunksize[1])
+                intensity_list = intensity_list[subset]
             else:
-                # Move channel axis to the beginning for each image in the list
-                intensity_list = [np.moveaxis(img, -1, 0).squeeze() for img in intensity_list]
-                np.save(os.path.join(savedir, f"intensity_{base}.npy"), intensity_list)
+                intensity_list = [np.moveaxis(intensity_data[t],0,-1) for t in range(intensity_data.shape[0])] if intensity_data is not None else [None] * len(masks)
+    
+            # Calculate regionprops for this scene using the separate function
+            if get_regionprops:
+                try:
+                    # Get spacing information
+                    spacing = (img.physical_pixel_sizes.Y, img.physical_pixel_sizes.X)
+                    masks_list, intensity_list = check_and_fix_shapes(masks_list, intensity_list)
+                    # Calculate regionprops for this scene
+                    scene_props_df = calculate_regionprops(
+                        masks=masks_list,
+                        intensity_images=intensity_list,
+                        file_path=file_path,
+                        scene=scene,
+                        spacing=spacing,
+                        channel_names=[img.channel_names[s] for s in segment_channels],
+                        physical_pixel_sizes=img.physical_pixel_sizes
+                    )
+                    
+                    # Add to collection if successful
+                    if scene_props_df is not None:
+                        all_scenes_props.append(scene_props_df)
+                    
+                except Exception as e:
+                    print(f"Error in regionprops calculation for scene {scene}: {e}")
         
+        # Save combined regionprops for all scenes of this file
+        if get_regionprops and all_scenes_props:
+            try:
+                # Combine all scenes for this file
+                combined_props_df = concat(all_scenes_props, ignore_index=True)
+                
+                # Save using the separate function
+                save_regionprops(combined_props_df, savedir, base)
+                
+            except Exception as e:
+                print(f"Error saving combined regionprops for file {file_path}: {e}")
 
 
+
+def user_interface():
+    import customtkinter as ctk
+    from tkinter import filedialog as fd
+    from tkinter import messagebox
+    
+    # Set appearance mode and color theme
+    ctk.set_appearance_mode("dark")
+    ctk.set_default_color_theme("blue")
+    
+    app = ctk.CTk()
+    app.geometry("1000x800")
+    app.title("DasHund Segmentation")
+    app.minsize(800, 600)
+    
+    # Configure grid weights for responsive design
+    app.grid_columnconfigure(0, weight=1)
+    app.grid_rowconfigure(0, weight=1)
+    
+    # Create main scrollable frame
+    main_scrollable = ctk.CTkScrollableFrame(app)
+    main_scrollable.grid(row=0, column=0, padx=10, pady=10, sticky="nsew")
+    main_scrollable.grid_columnconfigure(0, weight=1)
+    
+    # Title with better styling
+    title_label = ctk.CTkLabel(
+        main_scrollable, 
+        text="🧬 DasHund Segmentation", 
+        font=ctk.CTkFont(size=28, weight="bold")
+    )
+    title_label.grid(row=0, column=0, pady=(10, 20))
+    
+    # Status label for user feedback
+    status_label = ctk.CTkLabel(
+        main_scrollable, 
+        text="Select files to begin", 
+        font=ctk.CTkFont(size=12),
+        text_color="gray"
+    )
+    status_label.grid(row=1, column=0, pady=(0, 20))
+    
+    # Variables to store user inputs
+    file_checkboxes = []
+    selected_channel_var = ctk.StringVar()
+    intensity_channels_vars = []
+    model_diameter_var = ctk.IntVar(value=30)
+    get_regionprops_var = ctk.BooleanVar(value=True)
+    custom_model_var = ctk.BooleanVar(value=False)
+    model_path_var = ctk.StringVar()
+    savedir_var = ctk.StringVar()
+    scene_identifiers_var = ctk.StringVar()
+    
+    # Helper function to update status
+    def update_status(message, color="gray"):
+        status_label.configure(text=message, text_color=color)
+        app.update()
+    
+    # File Selection Section
+    file_section = ctk.CTkFrame(main_scrollable, corner_radius=15)
+    file_section.grid(row=2, column=0, padx=20, pady=10, sticky="ew", ipadx=20, ipady=15)
+    file_section.grid_columnconfigure(0, weight=1)
+    
+    file_label = ctk.CTkLabel(
+        file_section, 
+        text="📁 File Selection", 
+        font=ctk.CTkFont(size=20, weight="bold")
+    )
+    file_label.grid(row=0, column=0, pady=(0, 15))
+    
+    # File selection buttons in a horizontal layout
+    file_buttons_frame = ctk.CTkFrame(file_section, fg_color="transparent")
+    file_buttons_frame.grid(row=1, column=0, sticky="ew", padx=10)
+    file_buttons_frame.grid_columnconfigure((0, 1), weight=1)
+    
+    def browse_files():
+        update_status("Browsing for files...", "blue")
+        files = fd.askopenfilenames(
+            title="Select image files",
+            filetypes=[
+                ("All supported", "*.tif *.tiff *.nd2 *.lif *.czi *.png *.jpg"),
+                ("TIFF files", "*.tif *.tiff"),
+                ("ND2 files", "*.nd2"),
+                ("LIF files", "*.lif"),
+                ("CZI files", "*.czi"),
+                ("All files", "*.*")
+            ]
+        )
+        if files:
+            # Clear previous checkboxes
+            for widget in file_list_frame.winfo_children():
+                widget.destroy()
+            file_checkboxes.clear()
+            
+            for file in files:
+                var = ctk.BooleanVar(value=True)
+                chk = ctk.CTkCheckBox(
+                    file_list_frame, 
+                    text=os.path.basename(file), 
+                    variable=var,
+                    font=ctk.CTkFont(size=11)
+                )
+                chk.pack(anchor="w", padx=5, pady=3)
+                file_checkboxes.append((file, var))
+            
+            update_status(f"✓ {len(files)} files selected", "green")
+            
+            # Update channel options based on first file
+            update_channel_options(files[0])
+            
+            # Enable process button check
+            check_ready_to_process()
+        else:
+            update_status("No files selected", "orange")
+    
+    def browse_savedir():
+        update_status("Selecting save directory...", "blue")
+        directory = fd.askdirectory(title="Select save directory")
+        if directory:
+            savedir_var.set(directory)
+            # Truncate long paths for display
+            display_path = os.path.basename(directory) if len(directory) < 50 else f"...{directory[-40:]}"
+            savedir_label.configure(text=f"💾 Save to: {display_path}")
+            update_status("✓ Save directory selected", "green")
+            check_ready_to_process()
+        else:
+            update_status("No save directory selected", "orange")
+    
+    def browse_model():
+        model_file = fd.askopenfilename(
+            title="Select Cellpose model", 
+            filetypes=[("Model files", "*.pkl *.pth"), ("All files", "*.*")]
+        )
+        if model_file:
+            model_path_var.set(model_file)
+            model_name = os.path.basename(model_file)
+            model_path_label.configure(text=f"🧠 Model: {model_name}")
+    
+    browse_button = ctk.CTkButton(
+        file_buttons_frame, 
+        text="📂 Browse Files", 
+        command=browse_files,
+        height=35,
+        font=ctk.CTkFont(size=13, weight="bold")
+    )
+    browse_button.grid(row=0, column=0, padx=(0, 10), pady=5, sticky="ew")
+    
+    savedir_button = ctk.CTkButton(
+        file_buttons_frame, 
+        text="📁 Save Directory", 
+        command=browse_savedir,
+        height=35,
+        font=ctk.CTkFont(size=13, weight="bold")
+    )
+    savedir_button.grid(row=0, column=1, padx=(10, 0), pady=5, sticky="ew")
+    
+    # File list with better styling
+    file_list_frame = ctk.CTkScrollableFrame(file_section, height=120, corner_radius=10)
+    file_list_frame.grid(row=2, column=0, sticky="ew", padx=10, pady=10)
+    
+    # Save directory display with better styling
+    savedir_label = ctk.CTkLabel(
+        file_section, 
+        text="💾 Save directory: Not selected", 
+        font=ctk.CTkFont(size=12),
+        text_color="orange"
+    )
+    savedir_label.grid(row=3, column=0, pady=5)
+    
+    # Model Configuration Section
+    model_section = ctk.CTkFrame(main_scrollable, corner_radius=15)
+    model_section.grid(row=3, column=0, padx=20, pady=10, sticky="ew", ipadx=20, ipady=15)
+    model_section.grid_columnconfigure((0, 1), weight=1)
+    
+    model_label = ctk.CTkLabel(
+        model_section, 
+        text="🧠 Model Configuration", 
+        font=ctk.CTkFont(size=20, weight="bold")
+    )
+    model_label.grid(row=0, column=0, columnspan=2, pady=(0, 15))
+    
+    # Model diameter with better layout
+    diameter_frame = ctk.CTkFrame(model_section, fg_color="transparent")
+    diameter_frame.grid(row=1, column=0, columnspan=2, sticky="ew", padx=10, pady=5)
+    diameter_frame.grid_columnconfigure(1, weight=1)
+    
+    diameter_label = ctk.CTkLabel(diameter_frame, text="🔍 Cell Diameter (pixels):")
+    diameter_label.grid(row=0, column=0, sticky="w", padx=(0, 10))
+    
+    diameter_entry = ctk.CTkEntry(
+        diameter_frame, 
+        textvariable=model_diameter_var, 
+        width=100,
+        placeholder_text="30"
+    )
+    diameter_entry.grid(row=0, column=1, sticky="w")
+    
+    # Custom model section
+    custom_model_frame = ctk.CTkFrame(model_section, fg_color="transparent")
+    custom_model_frame.grid(row=2, column=0, columnspan=2, sticky="ew", padx=10, pady=10)
+    custom_model_frame.grid_columnconfigure(1, weight=1)
+    
+    def toggle_custom_model():
+        state = "normal" if custom_model_var.get() else "disabled"
+        model_path_button.configure(state=state)
+        if not custom_model_var.get():
+            model_path_var.set("")
+            model_path_label.configure(text="🧠 Model: Default Cellpose")
+    
+    custom_model_check = ctk.CTkCheckBox(
+        custom_model_frame, 
+        text="Use custom model", 
+        variable=custom_model_var, 
+        command=toggle_custom_model
+    )
+    custom_model_check.grid(row=0, column=0, sticky="w", padx=(0, 10))
+    
+    model_path_button = ctk.CTkButton(
+        custom_model_frame, 
+        text="Select Model", 
+        command=browse_model, 
+        state="disabled",
+        width=120
+    )
+    model_path_button.grid(row=0, column=1, sticky="w")
+    
+    model_path_label = ctk.CTkLabel(
+        model_section, 
+        text="🧠 Model: Default Cellpose", 
+        font=ctk.CTkFont(size=12)
+    )
+    model_path_label.grid(row=3, column=0, columnspan=2, pady=5)
+    
+    # Regionprops checkbox with better styling
+    regionprops_check = ctk.CTkCheckBox(
+        model_section, 
+        text="📊 Calculate region properties", 
+        variable=get_regionprops_var,
+        font=ctk.CTkFont(size=13)
+    )
+    regionprops_check.grid(row=4, column=0, columnspan=2, pady=15)
+    
+    # Channel Selection Section
+    channel_section = ctk.CTkFrame(main_scrollable, corner_radius=15)
+    channel_section.grid(row=4, column=0, padx=20, pady=10, sticky="ew", ipadx=20, ipady=15)
+    channel_section.grid_columnconfigure(0, weight=1)
+    
+    channel_label = ctk.CTkLabel(
+        channel_section, 
+        text="🎨 Channel Configuration", 
+        font=ctk.CTkFont(size=20, weight="bold")
+    )
+    channel_label.grid(row=0, column=0, pady=(0, 15))
+    
+    # Segmentation channel frame
+    seg_channel_frame = ctk.CTkFrame(channel_section, corner_radius=10)
+    seg_channel_frame.grid(row=1, column=0, sticky="ew", padx=10, pady=5)
+    seg_channel_frame.grid_columnconfigure(0, weight=1)
+    
+    seg_channel_label = ctk.CTkLabel(
+        seg_channel_frame, 
+        text="🎯 Segmentation Channel:", 
+        font=ctk.CTkFont(size=16, weight="bold")
+    )
+    seg_channel_label.grid(row=0, column=0, pady=8)
+    
+    seg_channel_container = ctk.CTkFrame(seg_channel_frame, fg_color="transparent")
+    seg_channel_container.grid(row=1, column=0, pady=8)
+    
+    # Intensity channels frame
+    int_channel_frame = ctk.CTkFrame(channel_section, corner_radius=10)
+    int_channel_frame.grid(row=2, column=0, sticky="ew", padx=10, pady=5)
+    int_channel_frame.grid_columnconfigure(0, weight=1)
+    
+    int_channel_label = ctk.CTkLabel(
+        int_channel_frame, 
+        text="📈 Intensity Channels:", 
+        font=ctk.CTkFont(size=16, weight="bold")
+    )
+    int_channel_label.grid(row=0, column=0, pady=8)
+    
+    int_channel_container = ctk.CTkFrame(int_channel_frame, fg_color="transparent")
+    int_channel_container.grid(row=1, column=0, pady=8)
+    
+    # Scene Selection Section
+    scene_section = ctk.CTkFrame(main_scrollable, corner_radius=15)
+    scene_section.grid(row=5, column=0, padx=20, pady=10, sticky="ew", ipadx=20, ipady=15)
+    scene_section.grid_columnconfigure(0, weight=1)
+    
+    scene_label = ctk.CTkLabel(
+        scene_section, 
+        text="🎬 Scene Selection", 
+        font=ctk.CTkFont(size=20, weight="bold")
+    )
+    scene_label.grid(row=0, column=0, pady=(0, 15))
+    
+    scene_info_label = ctk.CTkLabel(
+        scene_section, 
+        text="Scene identifiers (comma-separated, leave empty for all):", 
+        font=ctk.CTkFont(size=13)
+    )
+    scene_info_label.grid(row=1, column=0, pady=5)
+    
+    scene_example_label = ctk.CTkLabel(
+        scene_section, 
+        text="Select files to see available scenes", 
+        font=ctk.CTkFont(size=11, slant="italic"),
+        text_color="gray"
+    )
+    scene_example_label.grid(row=2, column=0, pady=5)
+    
+    scene_entry = ctk.CTkEntry(
+        scene_section, 
+        textvariable=scene_identifiers_var, 
+        width=400,
+        placeholder_text="e.g., Scene1, Scene2 (leave empty for all)"
+    )
+    scene_entry.grid(row=3, column=0, pady=10)
+    
+    def update_channel_options(file_path):
+        try:
+            update_status("Reading file metadata...", "blue")
+            image = AICSImage(file_path)
+            channels = image.channel_names
+            scenes = image.scenes
+            
+            # Clear previous channel widgets
+            for widget in seg_channel_container.winfo_children():
+                widget.destroy()
+            for widget in int_channel_container.winfo_children():
+                widget.destroy()
+            intensity_channels_vars.clear()
+            
+            # Update selected channel variable
+            selected_channel_var.set("0")  # Default to first channel
+            
+            # Create segmentation channel radio buttons
+            for i, channel in enumerate(channels):
+                radio = ctk.CTkRadioButton(
+                    seg_channel_container, 
+                    text=channel, 
+                    variable=selected_channel_var, 
+                    value=str(i),
+                    font=ctk.CTkFont(size=12)
+                )
+                radio.pack(side="left", padx=8, pady=5)
+            
+            # Create intensity channel checkboxes
+            for i, channel in enumerate(channels):
+                var = ctk.BooleanVar(value=True)
+                checkbox = ctk.CTkCheckBox(
+                    int_channel_container, 
+                    text=channel, 
+                    variable=var,
+                    font=ctk.CTkFont(size=12)
+                )
+                checkbox.pack(side="left", padx=8, pady=5)
+                intensity_channels_vars.append(var)
+            
+            # Update scene information
+            if scenes:
+                scene_text = f"Available scenes: {', '.join(scenes[:5])}"
+                if len(scenes) > 5:
+                    scene_text += f" ... and {len(scenes)-5} more"
+                scene_example_label.configure(text=scene_text, text_color="white")
+            else:
+                scene_example_label.configure(text="No scenes found", text_color="orange")
+            
+            update_status("✓ File metadata loaded", "green")
+            
+        except Exception as e:
+            update_status(f"❌ Error reading file: {str(e)}", "red")
+            messagebox.showerror("Error", f"Could not read file: {str(e)}")
+    
+    # Process Button Section - Always visible at bottom
+    process_section = ctk.CTkFrame(main_scrollable, corner_radius=15, fg_color="transparent")
+    process_section.grid(row=6, column=0, padx=20, pady=30, sticky="ew")
+    process_section.grid_columnconfigure(0, weight=1)
+    
+    def check_ready_to_process():
+        """Check if all required inputs are provided and enable/disable process button"""
+        selected_files = [file for file, var in file_checkboxes if var.get()]
+        has_files = len(selected_files) > 0
+        has_savedir = bool(savedir_var.get())
+        
+        if has_files and has_savedir:
+            process_button.configure(state="normal", text="🚀 Start Processing")
+            ready_label.configure(text="✓ Ready to process", text_color="green")
+        else:
+            process_button.configure(state="disabled", text="⏳ Configure settings first")
+            missing = []
+            if not has_files:
+                missing.append("files")
+            if not has_savedir:
+                missing.append("save directory")
+            ready_label.configure(text=f"❌ Missing: {', '.join(missing)}", text_color="orange")
+    
+    ready_label = ctk.CTkLabel(
+        process_section,
+        text="❌ Missing: files, save directory",
+        font=ctk.CTkFont(size=12),
+        text_color="orange"
+    )
+    ready_label.grid(row=0, column=0, pady=(0, 10))
+    
+    def start_processing():
+        # Validate inputs
+        selected_files = [file for file, var in file_checkboxes if var.get()]
+        if not selected_files:
+            messagebox.showerror("Error", "No files selected!")
+            return
+        
+        if not savedir_var.get():
+            messagebox.showerror("Error", "No save directory selected!")
+            return
+        
+        # Confirmation dialog
+        file_count = len(selected_files)
+        confirm_msg = f"Process {file_count} file{'s' if file_count > 1 else ''}?\n\nThis may take several minutes."
+        if not messagebox.askyesno("Confirm Processing", confirm_msg):
+            return
+        
+        try:
+            update_status("🚀 Starting processing...", "blue")
+            
+            # Get selected channels
+            segment_channel_index = int(selected_channel_var.get())
+            intensity_channel_indices = [i for i, var in enumerate(intensity_channels_vars) if var.get()]
+            
+            # Setup model
+            if custom_model_var.get() and model_path_var.get():
+                model = models.CellposeModel(gpu=True, pretrained_model=model_path_var.get())
+            else:
+                if cellpose_version >= '4.0':
+                    model = models.CellposeModel(gpu=True)
+                else:
+                    model = models.CellposeModel(gpu=True, pretrained_model='cyto3')
+            
+            # Get scene identifiers
+            scene_ids = None
+            if scene_identifiers_var.get().strip():
+                scene_ids = [s.strip() for s in scene_identifiers_var.get().split(',')]
+            
+            # Close the app window
+            app.destroy()
+            
+            # Process files
+            process_files_multichannel_2(
+                selected_files, 
+                model, 
+                model_diameter_var.get(), 
+                savedir_var.get(),
+                get_regionprops=get_regionprops_var.get(),
+                segment_channels=[segment_channel_index],
+                intensity_channels=intensity_channel_indices,
+                subset=slice(None),
+                chunksize=[1, 1],
+                scene_identifiers=scene_ids
+            )
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Processing failed: {str(e)}")
+    
+    process_button = ctk.CTkButton(
+        process_section, 
+        text="⏳ Configure settings first",
+        command=start_processing,
+        font=ctk.CTkFont(size=18, weight="bold"),
+        height=50,
+        width=300,
+        state="disabled"
+    )
+    process_button.grid(row=1, column=0, pady=10)
+    
+    # Initialize the ready check
+    check_ready_to_process()
+    
+    # Bind file selection changes to ready check
+    def on_file_change():
+        app.after(100, check_ready_to_process)  # Delay to ensure UI updates
+    
+    # Add trace to savedir_var
+    savedir_var.trace('w', lambda *args: check_ready_to_process())
+    
+    app.mainloop()
 
 if __name__ == "__main__":
-
-    # Make root window and make it hidden
-    root = tk.Tk()
-    root.withdraw()  # Hide the root window
-    root.call('wm', 'attributes', '.', '-topmost', True) # Keep the window on top
-    #Get user inputs
-    files = fd.askopenfilenames(title='Select files')
-    if not files:
-        messagebox.showerror("Error", "No files selected. Exiting.")
-        root.destroy()
-        exit()
-    savedir = fd.askdirectory(title='Select the directory to save the masks')
-    if not savedir:
-        savedir = os.path.dirname(files[0])  # Use the directory of the first file if no directory is selected
-    savefix = sd.askstring("Savefix", "Enter a suffix for the saved files (optional):", initialvalue=files[0].split('/')[-2])
-    # Check cellpose version
-    # Ask for the model diameter
-    model_diameter = sd.askinteger("Diameter", "Enter the diameter of the cells (in pixels):", initialvalue=30)
-    # Ask whether to get regionprops
-    get_regionprops = messagebox.askyesno("Regionprops", "Get region properties for the masks?")
+    user_interface()
     
-
-    # Custom or default model?
-    model_choice = messagebox.askyesno("Custom Model", "Use a custom model?")
-    if model_choice:
-        # If the user chooses to use a custom model, ask for the model file
-        model_path = fd.askopenfilename(title="Select a Cellpose model")
-        model = models.CellposeModel(gpu=True, pretrained_model=model_path)
-
-    else:
-        if cellpose_version >= '4.0':
-            # Use cellposeSAM model
-            model = models.CellposeModel(gpu=True)
-        elif cellpose_version < '4.0':
-            # Use cyto3 model on its own
-                model = models.CellposeModel(gpu=True, pretrained_model='cyto3')
-    root.destroy()  # Destroy the root window after getting inputs
-    # Process the files
-    process_files_multichannel_2(files, model, model_diameter, savedir, savefix=savefix, 
-                                 get_regionprops=get_regionprops, segment_channels=[1,0], intensity_channels=[0,1], 
-                                 subset=slice(None), chunksize=[1,1], scene_identifiers=["WT processed"])  
-    # endregion
-    #

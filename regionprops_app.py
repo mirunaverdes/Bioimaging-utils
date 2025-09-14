@@ -144,13 +144,13 @@ class RegionpropsApp:
 
         # Tabs
         self.plot_tabs = ctk.CTkTabview(self.plot_frame)
-        self.plot_tabs.add("Statistical comparisons")
+        #self.plot_tabs.add("Statistical comparisons")
         self.plot_tabs.add("Categorical comparisons")
         self.plot_tabs.add("Population scatterplots")
 
         self.plot_tabs.pack(fill="both", expand=True)
-        self.stats_tab = StatsTabFrame(self.plot_tabs.tab("Statistical comparisons"))
-        self.stats_tab.pack(fill="both", expand=True, padx=10, pady=10)
+        # self.stats_tab = StatsTabFrame(self.plot_tabs.tab("Statistical comparisons"))
+        # self.stats_tab.pack(fill="both", expand=True, padx=10, pady=10)
         self.cat_plot_frame = ctk.CTkFrame(self.plot_tabs.tab("Categorical comparisons"))
         self.cat_plot_frame.pack(fill="both", expand=True)
         self.cat_plot_frame.rowconfigure(0, weight=1)
@@ -270,8 +270,8 @@ class RegionpropsApp:
         title = self.scatter_controls.title_entry.get() if self.scatter_controls.title_entry.get() else f'{yaxis.replace("_", " ").title()} vs {xaxis.replace("_", " ").title()}'
         if xaxis and yaxis:
             self.clear_frame(self.scatter_plot_frame)
-            self.experiment.plot_population(x=xaxis, y=yaxis, hue='group', kind='scatter', show=False, title=title, xlabel=xlabel, ylabel=ylabel)
-            self.apply_figure_style(self.experiment.scatter_plot, grid_style='--', grid_alpha=0.7)
+            self.experiment.plot_jointplot(x=xaxis, y=yaxis, hue='group', kind='scatter', show=False, title=title, xlabel=xlabel, ylabel=ylabel)
+            #self.apply_figure_style(self.experiment.scatter_plot, grid_style='--', grid_alpha=0.7)
             canvas1 = FigureCanvasTkAgg(self.experiment.scatter_plot, master=self.scatter_plot_frame)
             canvas1.draw()
             canvas1.get_tk_widget().grid(row=0, column=0, sticky="nsew")

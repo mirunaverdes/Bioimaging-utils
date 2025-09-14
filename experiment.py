@@ -5,14 +5,19 @@ from skimage.measure import regionprops_table
 from utils import convert_to_minimal_format
 import os
 from tkinter import Tk
-from tkinter.filedialog import askopenfilenames, asksaveasfilename
+from tkinter.filedialog import askopenfilenames, asksaveasfilename, askopenfilename
+from tkinter import messagebox
+from tkinter.simpledialog import askstring
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from tkinter import ttk
 import matplotlib
+from experiment_statistics import ExperimentStatistics
+from experiment_plots import ExperimentPlots
+from sklearn.decomposition import PCA
 matplotlib.use('TkAgg')
 PROPERTIES_ALL = ('label', 'area', 'perimeter', 'centroid', 'intensity_mean', 'intensity_min', 'intensity_max', 'intensity_std','bbox', 'eccentricity', 'solidity', 'orientation', 'major_axis_length', 'minor_axis_length')
 PROPERTIES_MINIMAL = ('label', 'area', 'perimeter', 'centroid', 'intensity_mean', 'intensity_min', 'intensity_max', 'intensity_std')
-PROPERTIES_NO_INTENSITY = ('label', 'area', 'perimeter', 'centroid', 'bbox', 'eccentricity', 'solidity', 'orientation', 'major_axis_length', 'minor_axis_length')   
+PROPERTIES_NO_INTENSITY = ('label', 'area', 'perimeter', 'centroid', 'bbox', 'eccentricity', 'solidity', 'orientation', 'major_axis_length', 'minor_axis_length')
 PROPERTIES_CELL_SHAPE = ('label', 'area', 'perimeter', 'centroid', 'bbox', 'eccentricity', 'solidity', 'orientation', 'major_axis_length', 'minor_axis_length')
 PROPERTIES_INTENSITY = ('label', 'intensity_mean', 'intensity_min', 'intensity_max', 'intensity_std')
 FIG_SIZE = (3,2) # Width, Height in inches
@@ -27,8 +32,29 @@ class ExperimentSample:
         self.masksPath = masksPath
         if regionprops_df_path:
             self.regionprops_df = pd.read_csv(regionprops_df_path)
+        else:
+            self.regionprops_df = None
         self.bitDepth = bitDepth
-
+        if self.regionprops_df is None and self.imagePath is not None and self.masksPath is not None:
+            self.compute_regionprops()
+        if self.regionprops_df is not None and normalize:
+            self.normalize_intensity()
+    def load_regionprops(self, path=None):
+        if path is None:
+            path = askopenfilename(title="Path for regionprops csv:",filetypes=[("CSV files", "*.csv")])
+        self.regionprops_df = pd.read_csv(path)
+    def load_image(self, path=None):
+        if path is None:
+            path = askopenfilename(title="Path for image:", filetypes=[("Image files", "*.png;*.jpg;*.tif;*.npy; *.lif; *.czi; *.nd2")])
+        self.imagePath = path
+    def load_masks(self, path=None):
+        if path is None:
+            path = askopenfilename(title="Path for masks:", filetypes=[("Image files", "*.png;*.jpg;*.tif;*.npy; *.lif; *.czi; *.nd2")])
+        self.masksPath = path
+    def set_group(self, group=None):
+        if group is None:
+            group = askstring("Input", f"Set group for sample {self.name}:", parent=Tk())
+        self.group = group
     def compute_regionprops(self, properties=PROPERTIES_ALL):
         from aicsimageio import AICSImage
         from skimage.measure import regionprops_table
@@ -71,6 +97,27 @@ class ExperimentSample:
             path = asksaveasfilename(defaultextension=".csv", filetypes=[("CSV files", "*.csv")])
         self.regionprops_df.to_csv(path, index=False)
 
+
+class RegionpropsFilter:
+    def __init__(self, column, type, thresholds_low=None, thresholds_high=None, category_remove=None, category_keep=None):
+        """
+        Initialize a RegionpropsFilter. 
+
+        Args:
+            column (str): The column to filter on.
+            type (str): The type of filter. Must be either "numeric" or "categorical".
+            thresholds_low (list, optional): The lower threshold for filtering. Anything < threshold_low is filtered out.
+            thresholds_high (list, optional): The upper threshold for filtering. Anything > threshold_high is filtered out.
+            category_remove (str, optional): The category to filter by. Anything in the category is filtered out.
+            category_keep (str, optional): The category to keep. Anything not in the category is filtered out.
+        """
+        self.column = column
+        self.type = type
+        self.thresholds_low = thresholds_low
+        self.thresholds_high = thresholds_high
+        self.category_remove = category_remove
+        self.category_keep = category_keep
+
 # Class to hold multiple experiment samples with functions to combine regionprops dataframes, compute summary statistics
 # and plot population plots grouped by group with seaborn
 class Experiment:
@@ -80,9 +127,11 @@ class Experiment:
         self.summary = pd.DataFrame()
         self.scatter_plot = None
         self.cat_plot = None
-        self.normality_results = None
-        self.homoscedasticity_result = None
+        self.joint_plot = None # Not implemented
+        self.pair_plot = None
         self.figSize = FIG_SIZE
+        self.statistics = ExperimentStatistics(self)  # Use composition
+        self.plots = ExperimentPlots(self, self.regionprops)  # Use composition
 
     def add_sample(self, sample):
         self.samples.append(sample)
@@ -99,6 +148,16 @@ class Experiment:
         if self.summary is not None:
             # Update summary statistics
             self.summary = self.summarize()
+    
+    def add_group(self, group_name=None, samples = None):
+        if group_name is None:
+            group_name = askstring(title="Add group", prompt="Set group name")
+        if samples is None:
+            paths = askopenfilenames(title="Select sample regionprops csv files for group " + group_name, filetypes=[("CSV files", "*.csv")])
+            samples = [ExperimentSample(regionprops_df_path=path, group=group_name, name=os.path.basename(path).split('.')[0]) for path in paths]
+        for sample in samples:
+            self.add_sample(sample)
+
     def remove_group(self, group_name):
         self.regionprops = self.regionprops[self.regionprops['group'] != group_name]
         if self.summary is not None:
@@ -120,43 +179,49 @@ class Experiment:
             self.regionprops['intensity_max'] /= (2 ** camera_bit_depth - 1)
         if 'intensity_std' in self.regionprops.columns:
             self.regionprops['intensity_std'] /= (2 ** camera_bit_depth - 1)
-    
-    def remove_outliers(self):
-        # Remove outliers from the regionprops dataframe
-        numeric_cols = self.regionprops.select_dtypes(include=[np.number]).columns
-        # Exclude 'labels'/'label'/'group'/'sample' column
-        numeric_cols = numeric_cols[numeric_cols != 'labels']
-        numeric_cols = numeric_cols[numeric_cols != 'label']
-        numeric_cols = numeric_cols[numeric_cols != 'group']
-        numeric_cols = numeric_cols[numeric_cols != 'sample']
-        self.regionprops = self.regionprops[~self.regionprops[numeric_cols].isin([np.nan, np.inf, -np.inf]).any(axis=1)]
-        # Find statistical outliers and remove them
-        for col in numeric_cols:
-            if col in self.regionprops.columns:
-                q1 = self.regionprops[col].quantile(0.25)
-                q3 = self.regionprops[col].quantile(0.75)
-                iqr = q3 - q1
-                self.regionprops = self.regionprops[~self.regionprops[col].between(q1 - 1.5 * iqr, q3 + 1.5 * iqr)]
-        # Reset index after removing outliers
-        self.regionprops.reset_index(drop=True, inplace=True)
 
-    def normalize_regprops_across_groups(self):
+    def filter_data(self, filters):
+        """
+        Filter the regionprops dataframe based on thresholds on any column.
+
+        Args:
+            filters (list of RegionpropsFilter): List of filter objects to apply.
+        """
+        for filter in filters:
+            if filter.column in self.regionprops.columns:
+                if filter.type == 'categorical':
+                    if filter.category_remove is not None:
+                        self.regionprops_filtered = self.regionprops[self.regionprops[filter.column] != filter.category_remove]
+                    if filter.category_keep is not None:
+                        self.regionprops_filtered = self.regionprops[self.regionprops[filter.column] == filter.category_keep]
+                elif filter.type == 'numeric':
+                    if filter.thresholds_low is not None:
+                        self.regionprops_filtered = self.regionprops[self.regionprops[filter.column] >= filter.thresholds_low]
+                    if filter.thresholds_high is not None:
+                        self.regionprops_filtered = self.regionprops[self.regionprops[filter.column] <= filter.thresholds_high]
+
+    def normalize_regprops_across_groups(self, columns):
+        # Check columns are numeric
+        numeric_columns = self.regionprops.select_dtypes(include=[np.number]).columns
+        columns = [col for col in columns if col in numeric_columns]
         # Normalize regionprops across groups
-        self.regionprops = self.regionprops.groupby('group').transform(lambda x: (x - x.min()) / (x.max() - x.min()) if x.max() != x.min() else 0)
+        self.regionprops[columns] = self.regionprops[columns].groupby(self.regionprops['group']).transform(lambda x: (x - x.min()) / (x.max() - x.min()) if x.max() != x.min() else 0)
 
     def get_common_attributes(self):
         # Get the common attributes across all samples
         common_attrs = set.intersection(*(set(s.regionprops_df.columns) for s in self.samples))
         return common_attrs
 
-    def plot_population(self, x, y, hue=None, kind='scatter', show=False, title=None, xlabel=None, ylabel=None, **kwargs):
+    def plot_jointplot(self, x, y, hue='group', kind='joint', show=False, title=None, xlabel=None, ylabel=None, **kwargs):
         sns.set_theme(style="whitegrid")
         fig, ax = plt.subplots(figsize=FIG_SIZE, constrained_layout=True)
         if kind == 'scatter':
             sns.scatterplot(data=self.regionprops, x=x, y=y, hue=hue, ax=ax, **kwargs)
         elif kind == 'box':
             sns.boxplot(data=self.regionprops, x=x, y=y, hue=hue, ax=ax, **kwargs)
-        ax.set_title(f'Population Plot: {y} vs {x}')
+        elif kind == 'joint':
+            sns.jointplot(data=self.regionprops, x=x, y=y, hue=hue, kind='kde')
+        #ax.set_title(f'Population Plot: {y} vs {x}')
         ax.legend(loc='best', fontsize='small')
         if title is not None:
             ax.set_title(title)
@@ -169,8 +234,6 @@ class Experiment:
         self.scatter_plot = fig
         if show:
             plt.show()
-
-        
 
     def plot_categorical_comparisons(self, plot_kind, metric, show=False, title=None, xlabel=None, ylabel=None, **kvargs):
         from statannotations.Annotator import Annotator
@@ -195,19 +258,20 @@ class Experiment:
             ax.set_xlabel(xlabel)
         if ylabel is not None:
             ax.set_ylabel(ylabel)
+
         # Prepare pairs for annotation (all pairwise group comparisons)
         groups = self.regionprops['group'].unique()
         pairs = [(g1, g2) for i, g1 in enumerate(groups) for g2 in groups[i+1:]]
 
         # Prepare p-values for annotation
-        self.compare_groups(metric=metric)
+        self.statistics.compare_groups(metric=metric)
         
         if hasattr(self, "tukey_results") and not self.tukey_results.empty:
             pvalues = []
             for g1, g2 in pairs:
-                match = self.tukey_results[
-                    ((self.tukey_results['group1'] == g1) & (self.tukey_results['group2'] == g2)) |
-                    ((self.tukey_results['group1'] == g2) & (self.tukey_results['group2'] == g1))
+                match = self.statistics.tukey_results[
+                    ((self.statistics.tukey_results['group1'] == g1) & (self.statistics.tukey_results['group2'] == g2)) |
+                    ((self.statistics.tukey_results['group1'] == g2) & (self.statistics.tukey_results['group2'] == g1))
                 ]
                 if not match.empty:
                     pvalues.append(float(match['p-adj'].values[0]))
@@ -222,6 +286,56 @@ class Experiment:
             plt.show()
         self.cat_plot = fig
 
+    
+    def get_principal_components(self, n_components=3, columns=None):
+        """ Extracts principal components from regionprops dataframe and returns them.
+            Args:
+                n_components (int): Number of principal components to return.
+                columns (list): List of columns to use for PCA (must be numeric).
+            Returns:
+                DataFrame with principal components.
+        """
+        if columns is None:
+            columns = self.regionprops.select_dtypes(include=['float64', 'int64']).columns.tolist()
+            # Remove "group", "label", "index", "sample", "bbox-0", "bbox-1", "bbox-2", "bbox-3", "centroid-0", "centroid-1"
+            columns = [col for col in columns if col not in ["group", "label", "index", "sample", "bbox-0", "bbox-1", "bbox-2", "bbox-3", "centroid-0", "centroid-1"]]
+
+        pca = PCA(n_components=n_components)
+        components = pca.fit_transform(self.regionprops[columns])
+        return pd.DataFrame(components, columns=[f"PC{i+1}" for i in range(n_components)])
+
+    def plot_pair_plot(self, dataframe, columns=None, show=False, title=None, xlabel=None, ylabel=None, **kwargs):
+        """Plots a pair plot from a regionprops dataframe using group/sample as selectors.
+
+        Args:
+            dataframe: DataFrame with regionprops data.
+            columns (list): List of columns to include in the plot.
+            show (bool): Whether to show the plot.
+            title (str): Title of the plot.
+            xlabel (str): Label for the x-axis.
+            ylabel (str): Label for the y-axis.
+            **kwargs: Additional keyword arguments for the plot.
+        """
+        if columns is None:
+            # Select numerical columns
+            columns = dataframe.select_dtypes(include=['float64', 'int64']).columns.tolist()
+            # Remove "group", "label", "index", "sample", "bbox-0", "bbox-1", "bbox-2", "bbox-3", "centroid-0", "centroid-1"
+            columns = [col for col in columns if col not in ["group", "label", "index", "sample", "bbox-0", "bbox-1", "bbox-2", "bbox-3", "centroid-0", "centroid-1"]]
+
+        # Create the pair plot
+        g = sns.pairplot(data=dataframe, vars=columns, **kwargs)
+
+        # Set titles and labels
+        if title is not None:
+            g.figure.suptitle(title, fontsize=16)
+        
+        g.set_axis_labels(xlabel if xlabel else columns[0], ylabel if ylabel else columns[1], fontsize=12)
+
+        if show:
+            plt.show()
+
+        self.pair_plot = g.figure
+
     def save_plots(self):
         """Save all generated plots to files."""
         if self.scatter_plot:
@@ -232,6 +346,7 @@ class Experiment:
             filename = asksaveasfilename(title="Save Categorical Plot", defaultextension=".png", filetypes=[("PNG files", "*.png"), ("All files", "*.*")])
             if filename:
                 self.cat_plot.savefig(filename)
+                
     def save_regionprops(self, path=None):
         """Save regionprops df to csv"""
         if path is not None:
@@ -239,98 +354,19 @@ class Experiment:
         else:
             path = asksaveasfilename(defaultextension=".csv", filetypes=[("CSV files", "*.csv")])
             self.regionprops.to_csv(path, index=False)
-    def compare_groups(self, metric='area'):
-        """Make statistical comparisons between groups. Store matrix of p-values of the statistical test"""
-        import scipy.stats as stats
-        # Test for normality (per group)
-        self.normality_results = self.regionprops.groupby('group')[metric].apply(lambda x: self.normality_test(x))
-        # Test for homoscedasticity (Levene's test across all groups)
-        group_values = [group[metric].dropna().values for name, group in self.regionprops.groupby('group')]
-        if len(group_values) < 2:
-            self.anova_results = None
-            self.kruskal_results = None
-            self.tukey_results = pd.DataFrame()
-            return
-        self.homoscedasticity_result = stats.levene(*group_values)
-        # If all groups are normal, and homoscedasticity holds use ANOVA
-        if all(result.pvalue > 0.05 for result in self.normality_results) and self.homoscedasticity_result.pvalue > 0.05:
-            self.anova_results = stats.f_oneway(*group_values)
-            self.posthoc_tukey(metric=metric)
-        else:
-            # If not all groups are normal or homoscedasticity fails, use Kruskal-Wallis
-            self.kruskal_results = stats.kruskal(*group_values)
-            self.tukey_results = pd.DataFrame()  # Clear if not applicable
-
-    def posthoc_tukey(self, metric='area'):
-        """Run Tukey HSD post hoc test and store results as a DataFrame."""
-        from statsmodels.stats.multicomp import pairwise_tukeyhsd
-
-        if self.regionprops['group'].nunique() > 1:
-            tukey = pairwise_tukeyhsd(endog=self.regionprops[metric], groups=self.regionprops['group'])
-            self.tukey_results = pd.DataFrame(data=tukey.summary().data[1:], columns=tukey.summary().data[0])
-        else:
-            self.tukey_results = pd.DataFrame()
-
-    def plot_scatter_data(dataframe, **kwargs):
-        """
-        Plots scatter data from a regionprops dataframe using group/sample as selectors.
-
-        Args:
-            dataframe: DataFrame with regionprops data.
-            **kwargs:
-                group (str): group name to filter by (must be in dataframe['group'])
-                sample (str): sample name to filter by (optional, must be in dataframe['sample'])
-                yaxis (str): column name for y-axis
-                xaxis (str): column name for x-axis
-                yaxis_inx (int): index of y-axis column
-                xaxis_inx (int): index of x-axis column
-        """
-        group = kwargs.get('group')
-        if group and group not in dataframe['group'].unique():
-            raise ValueError(f"`group` must be one of: {dataframe['group'].unique()}")
-
-        sample = kwargs.get('sample')
-        if sample and sample not in dataframe['sample'].unique():
-            raise ValueError(f"`sample` must be one of: {dataframe['sample'].unique()}")
-
-        yaxis = kwargs.get('yaxis')
-        xaxis = kwargs.get('xaxis')
-        yaxis_inx = kwargs.get('yaxis_inx')
-        xaxis_inx = kwargs.get('xaxis_inx')
-
-        if yaxis_inx is not None and not yaxis:
-            yaxis = dataframe.columns[yaxis_inx]
-        if xaxis_inx is not None and not xaxis:
-            xaxis = dataframe.columns[xaxis_inx]
-
-        if not yaxis or not xaxis:
-            raise ValueError("Both `yaxis` and `xaxis` must be specified (by name or index).")
-
-        # Filter by group and sample if provided
-        df = dataframe.copy()
-        if group:
-            df = df[df['group'] == group]
-        if sample:
-            df = df[df['sample'] == sample]
-
-        print(f"Group: {group if group else 'All'} | Sample: {sample if sample else 'All'} | Plotting {xaxis} vs {yaxis}")
-
-        sns.set_theme(style="darkgrid", palette="colorblind")
-        ax = sns.scatterplot(data=df, x=xaxis, y=yaxis, size='area' if 'area' in df.columns else None, hue='group' if 'group' in df.columns else None)
-
-        plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left', borderaxespad=0.)
-        plt.show()
-
-    def normality_test(self, arr):
-        import scipy.stats as stats
-        arr = np.asarray(arr)
-        arr = arr[~np.isnan(arr)]
-        if len(arr) > 5000:
-            return stats.normaltest(arr)
-        else:
-            return stats.shapiro(arr)
 
 if __name__ == "__main__":
+    def test_add_groups():
+        """Test adding groups to the experiment."""
+        root = Tk()
+        root.withdraw()  # Hide the main window
+        
+        experiment = Experiment()
+        experiment.add_group()
+        experiment.add_group()
+        
+        return experiment
+
     def test_regionprops():
         im_paths = askopenfilenames(title="Select image files", filetypes=[("Image files", "*.tif *.tiff *.npy"), ("All files", "*.*")])
         mask_paths = askopenfilenames(title="Select mask files", filetypes=[("Image files", "*.tif *.tiff *.npy"), ("All files", "*.*")])
@@ -350,11 +386,26 @@ if __name__ == "__main__":
         path = f"{os.path.dirname(im_paths[0])}_regionprops_summary.csv"
         summary.to_csv(path, index=False)
     
-    def test_statistics():
+    def test_statistics(experiment):
+        from experiment_statistics import ExperimentStatistics
         # Load samples with regionprops paths
-        paths = askopenfilenames(title="Select regionprops CSV files", filetypes=[("CSV files", "*.csv"), ("All files", "*.*")])
-        experiment = Experiment()
-        for inx, path in enumerate(paths):
-            sample = ExperimentSample(os.path.basename(path).split('_regionprops_')[1].split('.csv')[0], f"Group{inx+1}", regionprops_df_path=path)
-            experiment.add_sample(sample)
-        experiment.remove_outliers()
+        experiment.statistics.remove_outliers()
+        experiment.statistics.compare_groups(metric='area')
+        if hasattr(experiment.statistics, "normality_results"):
+            print(f"Normal distributions: {experiment.statistics.normality_results}")
+        if hasattr(experiment.statistics,"homoscedasticity_result"):
+            print(f"Equal variance: {experiment.statistics.homoscedasticity_result}")
+        if hasattr(experiment.statistics, "tukey_results"):
+            print(f"Tukey: {experiment.statistics.tukey_results}")
+        elif hasattr(experiment.statistics, "anova_results"):
+            print(experiment.statistics.anova_results)
+        elif hasattr(experiment.statistics, "kruskal_results"):
+            print(experiment.statistics.kruskal_results)
+
+    def test_plots(experiment):
+        experiment.plot_population(x='area', y='perimeter', hue='group', kind='scatter', show=True)
+        experiment.plot_population(x='area', y='perimeter', hue='group', kind='joint', show=True)
+
+    experiment = test_add_groups()
+    #test_statistics(experiment)
+    test_plots(experiment)
