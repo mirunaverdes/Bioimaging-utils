@@ -99,24 +99,46 @@ class ExperimentSample:
 
 
 class RegionpropsFilter:
-    def __init__(self, column, type, thresholds_low=None, thresholds_high=None, category_remove=None, category_keep=None):
+    def __init__(self, column, filter_type, threshold_low=None, threshold_high=None, 
+                 categories_remove=None, categories_keep=None, enabled=True):
         """
-        Initialize a RegionpropsFilter. 
+        Initialize a RegionpropsFilter.
 
         Args:
             column (str): The column to filter on.
-            type (str): The type of filter. Must be either "numeric" or "categorical".
-            thresholds_low (list, optional): The lower threshold for filtering. Anything < threshold_low is filtered out.
-            thresholds_high (list, optional): The upper threshold for filtering. Anything > threshold_high is filtered out.
-            category_remove (str, optional): The category to filter by. Anything in the category is filtered out.
-            category_keep (str, optional): The category to keep. Anything not in the category is filtered out.
+            filter_type (str): The type of filter. Must be either "numeric" or "categorical".
+            threshold_low (float, optional): The lower threshold for filtering. Anything < threshold_low is filtered out.
+            threshold_high (float, optional): The upper threshold for filtering. Anything > threshold_high is filtered out.
+            categories_remove (list, optional): Categories to filter out. Anything in these categories is filtered out.
+            categories_keep (list, optional): Categories to keep. Anything not in these categories is filtered out.
+            enabled (bool): Whether this filter is active.
         """
         self.column = column
-        self.type = type
-        self.thresholds_low = thresholds_low
-        self.thresholds_high = thresholds_high
-        self.category_remove = category_remove
-        self.category_keep = category_keep
+        self.filter_type = filter_type
+        self.threshold_low = threshold_low
+        self.threshold_high = threshold_high
+        self.categories_remove = categories_remove or []
+        self.categories_keep = categories_keep or []
+        self.enabled = enabled
+    
+    def apply(self, df):
+        """Apply this filter to a dataframe."""
+        if not self.enabled or self.column not in df.columns:
+            return df
+        
+        if self.filter_type == 'numeric':
+            if self.threshold_low is not None:
+                df = df[df[self.column] >= self.threshold_low]
+            if self.threshold_high is not None:
+                df = df[df[self.column] <= self.threshold_high]
+        
+        elif self.filter_type == 'categorical':
+            if self.categories_remove:
+                df = df[~df[self.column].isin(self.categories_remove)]
+            if self.categories_keep:
+                df = df[df[self.column].isin(self.categories_keep)]
+        
+        return df
 
 # Class to hold multiple experiment samples with functions to combine regionprops dataframes, compute summary statistics
 # and plot population plots grouped by group with seaborn
@@ -180,37 +202,69 @@ class Experiment:
         if 'intensity_std' in self.regionprops.columns:
             self.regionprops['intensity_std'] /= (2 ** camera_bit_depth - 1)
 
-    def filter_data(self, filters):
-        """
-        Filter the regionprops dataframe based on thresholds on any column.
+    def add_filter(self, filter_obj):
+        """Add a filter to the experiment."""
+        if not hasattr(self, 'active_filters'):
+            self.active_filters = []
+        self.active_filters.append(filter_obj)
 
-        Args:
-            filters (list of RegionpropsFilter): List of filter objects to apply.
-        """
-        for filter in filters:
-            if filter.column in self.regionprops.columns:
-                if filter.type == 'categorical':
-                    if filter.category_remove is not None:
-                        self.regionprops_filtered = self.regionprops[self.regionprops[filter.column] != filter.category_remove]
-                    if filter.category_keep is not None:
-                        self.regionprops_filtered = self.regionprops[self.regionprops[filter.column] == filter.category_keep]
-                elif filter.type == 'numeric':
-                    if filter.thresholds_low is not None:
-                        self.regionprops_filtered = self.regionprops[self.regionprops[filter.column] >= filter.thresholds_low]
-                    if filter.thresholds_high is not None:
-                        self.regionprops_filtered = self.regionprops[self.regionprops[filter.column] <= filter.thresholds_high]
+    def remove_filter(self, filter_index):
+        """Remove a filter by index."""
+        if hasattr(self, 'active_filters') and 0 <= filter_index < len(self.active_filters):
+            self.active_filters.pop(filter_index)
 
-    def normalize_regprops_across_groups(self, columns):
-        # Check columns are numeric
-        numeric_columns = self.regionprops.select_dtypes(include=[np.number]).columns
-        columns = [col for col in columns if col in numeric_columns]
-        # Normalize regionprops across groups
-        self.regionprops[columns] = self.regionprops[columns].groupby(self.regionprops['group']).transform(lambda x: (x - x.min()) / (x.max() - x.min()) if x.max() != x.min() else 0)
+    def clear_filters(self):
+        """Clear all filters."""
+        self.active_filters = []
 
+    def reset_data(self):
+        """Reset regionprops to original unfiltered state."""
+        # Rebuild from samples
+        self.regionprops = pd.DataFrame()
+        for sample in self.samples:
+            sampleDf = sample.regionprops_df.copy()
+            sampleDf['sample'] = sample.name
+            sampleDf['group'] = sample.group
+            self.regionprops = pd.concat([self.regionprops, sampleDf], ignore_index=True)
+    
     def get_common_attributes(self):
         # Get the common attributes across all samples
         common_attrs = set.intersection(*(set(s.regionprops_df.columns) for s in self.samples))
         return common_attrs
+    
+    def filter_data(self, filters=None, apply_to_original=False):
+        """
+        Filter the regionprops dataframe based on multiple filters.
+
+        Args:
+            filters (list of RegionpropsFilter): List of filter objects to apply.
+            apply_to_original (bool): If True, modify the original regionprops DataFrame.
+                                     If False, create a filtered copy.
+        
+        Returns:
+            pd.DataFrame: Filtered dataframe if apply_to_original=False
+        """
+        if filters is None:
+            filters = getattr(self, 'active_filters', [])
+        
+        # Start with original data
+        df = self.regionprops.copy()
+        original_count = len(df)
+        
+        # Apply each filter
+        for filter_obj in filters:
+            if filter_obj.enabled:
+                df = filter_obj.apply(df)
+        
+        filtered_count = len(df)
+        filter_summary = f"Filtered from {original_count} to {filtered_count} rows ({filtered_count/original_count*100:.1f}%)"
+        
+        if apply_to_original:
+            self.regionprops = df
+            print(f"Applied filters to original data: {filter_summary}")
+        else:
+            print(f"Filter preview: {filter_summary}")
+            return df
 
     def plot_jointplot(self, x, y, hue='group', kind='joint', show=False, title=None, xlabel=None, ylabel=None, **kwargs):
         sns.set_theme(style="whitegrid")

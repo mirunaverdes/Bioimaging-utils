@@ -1,308 +1,432 @@
 import numpy as np
 import pandas as pd
 import seaborn as sns
+import matplotlib.pyplot as plt
+from matplotlib.figure import Figure
 from tkinter.filedialog import asksaveasfilename
-from matplotlib import pyplot as plt
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional, List, Union, Tuple
+import warnings
+
 if TYPE_CHECKING:
     from experiment import Experiment
 
 class ExperimentPlots:
-    def __init__(self, experiment:"Experiment" = None, regionprops: pd.DataFrame = None, fig_size=(10, 6)):
+    """
+    A comprehensive plotting class for experiment data analysis.
+    Provides consistent styling and easy-to-use methods for various plot types.
+    """
+    
+    def __init__(self, experiment: "Experiment" = None, regionprops: pd.DataFrame = None, 
+                 fig_size: Tuple[int, int] = (10, 6), style: str = "whitegrid", 
+                 palette: str = "Set2", context: str = "notebook"):
+        """
+        Initialize the plotting class.
+        
+        Args:
+            experiment: Experiment object containing data and statistics
+            regionprops: DataFrame with region properties data
+            fig_size: Default figure size (width, height)
+            style: Seaborn style theme
+            palette: Default color palette
+            context: Seaborn context for scaling
+        """
         self.experiment: "Experiment" = experiment
-        self.regionprops = regionprops
+        self.regionprops = regionprops if regionprops is not None else (
+            experiment.regionprops if experiment else pd.DataFrame()
+        )
         self.fig_size = fig_size
-        self.joint_plot: sns.JointGrid = None
-        self.pair_plot: sns.PairGrid = None
-        # self.relation_plot: sns.FacetGrid = None
-        # self.distribution_plot: sns.FacetGrid = None
-        self.categorical_plot: sns.FacetGrid = None
-
-    def set_joint_plot(self, x, y, hue='group', kind='kde', show=False, **kwargs):
-        df = self.regionprops
-        self.joint_plot = sns.jointplot(data=df, x=x, y=y, hue=hue, kind=kind, **kwargs)
-        self.style_joint_plot()
-        if show:
-            plt.show()
-
-    def get_joint_plot(self):
-        return self.joint_plot
-
-    def style_joint_plot(self, title=None, xlabel=None, ylabel=None):
-        if self.joint_plot is not None:
-            # Use direct attribute access instead of .set()
-            self.joint_plot.figure.set_size_inches(self.fig_size)
-            
-            if title:
-                self.joint_plot.figure.suptitle(title, fontsize=14)
-            if xlabel:
-                self.joint_plot.ax_joint.set_xlabel(xlabel, fontsize=12)
-            if ylabel:
-                self.joint_plot.ax_joint.set_ylabel(ylabel, fontsize=12)
-                
-            # Style the tick labels
-            plt.setp(self.joint_plot.ax_joint.get_xticklabels(), fontsize=10)
-            plt.setp(self.joint_plot.ax_joint.get_yticklabels(), fontsize=10)
-            
-            # Handle legend if it exists
-            if self.joint_plot.ax_joint.get_legend():
-                self.joint_plot.ax_joint.legend(fontsize=10)
-
-    def set_pair_plot(self, columns=None, hue="group", palette='flare', corner=True, 
-                  height=2.5, aspect=1, show=False, **kwargs):
-        df = self.regionprops
+        self.style = style
+        self.palette = palette
+        self.context = context
         
-        # Filter columns if not specified
-        if columns is None:
-            columns = df.select_dtypes(include=['float64', 'int64']).columns.tolist()
-            columns = [col for col in columns if col not in ["group", "label", "index", "sample", "bbox-0", "bbox-1", "bbox-2", "bbox-3", "centroid-0", "centroid-1"]]
+        # Plot storage
+        self.joint_plot: Optional[Figure] = None
+        self.pair_plot: Optional[Figure] = None
+        self.categorical_plot: Optional[Figure] = None
+        self.pca_plot: Optional[Figure] = None
         
-        # Create pairplot with styling parameters
-        self.pair_plot = sns.pairplot(
-            data=df, 
-            vars=columns, 
-            hue=hue, 
-            palette=palette, 
-            corner=corner, 
-            height=height, 
-            aspect=aspect,
-            **kwargs
+        # Set default theme
+        self._apply_theme()
+    
+    def _apply_theme(self):
+        """Apply consistent theming to all plots"""
+        sns.set_theme(style=self.style, palette=self.palette, context=self.context)
+        plt.rcParams.update({
+            'figure.figsize': self.fig_size,
+            'figure.dpi': 100,  # Good balance for screen display
+            'axes.titlesize': 12,
+            'axes.labelsize': 10,
+            'xtick.labelsize': 9,
+            'ytick.labelsize': 9,
+            'legend.fontsize': 9,
+            'font.size': 9,
+            'figure.constrained_layout.use': True  # Better automatic layout
+        })
+    
+    def _get_numeric_columns(self, exclude_cols: List[str] = None) -> List[str]:
+        """Get numeric columns excluding specified ones"""
+        if exclude_cols is None:
+            exclude_cols = ["group", "label", "index", "sample", "frame", "scene",
+                          "bbox-0", "bbox-1", "bbox-2", "bbox-3", 
+                          "centroid-0", "centroid-1", "track_id"]
+        
+        numeric_cols = self.regionprops.select_dtypes(include=[np.number]).columns.tolist()
+        return [col for col in numeric_cols if col not in exclude_cols]
+    
+    def plot_jointplot(self, x: str, y: str, hue: str = 'group', kind: str = 'scatter',
+                      title: str = None, xlabel: str = None, ylabel: str = None,
+                      show: bool = False, save_path: str = None, **kwargs) -> Figure:
+        """
+        Create a joint plot with marginal distributions.
+        
+        Args:
+            x, y: Column names for x and y axes
+            hue: Column name for color grouping
+            kind: Type of plot ('scatter', 'kde', 'hex', 'reg')
+            title, xlabel, ylabel: Plot labels
+            show: Whether to display the plot
+            save_path: Path to save the plot
+            **kwargs: Additional arguments for sns.jointplot
+            
+        Returns:
+            matplotlib Figure object
+        """
+        # Set default labels
+        xlabel = xlabel or x.replace('_', ' ').title()
+        ylabel = ylabel or y.replace('_', ' ').title()
+        title = title or f'{ylabel} vs {xlabel}'
+        
+        # Create joint plot
+        grid = sns.jointplot(
+            data=self.regionprops, x=x, y=y, hue=hue, kind=kind,
+            height=self.fig_size[1], **kwargs
         )
         
-        # Apply additional styling
-        self.style_pair_plot()
+        # Style the plot
+        grid.figure.suptitle(title, fontsize=14, y=1.02)
+        grid.ax_joint.set_xlabel(xlabel, fontsize=12)
+        grid.ax_joint.set_ylabel(ylabel, fontsize=12)
+        
+        # Adjust layout
+        grid.figure.tight_layout()
+        
+        # Store the figure
+        self.joint_plot = grid.figure
+        
+        if save_path:
+            self.joint_plot.savefig(save_path, dpi=300, bbox_inches='tight')
         
         if show:
             plt.show()
-    def get_pair_plot(self):
-        return self.pair_plot
-    def style_pair_plot(self, title=None, xlabel=None, ylabel=None):
-        """Style the existing pair plot. Most styling must be done during creation."""
-        if self.pair_plot is not None:
-            # Set figure size
-            self.pair_plot.figure.set_size_inches(self.fig_size)
-            
-            # Set title
-            if title:
-                self.pair_plot.figure.suptitle(title, fontsize=14)
-                
-            # Set axis labels (this sets labels for all subplots)
-            if xlabel or ylabel:
-                self.pair_plot.set_axis_labels(
-                    xlabel if xlabel else "X", 
-                    ylabel if ylabel else "Y",
-                    fontsize=10
-                )
-            
-            # Adjust tick label sizes
-            for ax in self.pair_plot.axes.flatten():
-                if ax is not None:
-                    plt.setp(ax.get_xticklabels(), fontsize=8)
-                    plt.setp(ax.get_yticklabels(), fontsize=8)
-            
-            # Apply tight layout
-            self.pair_plot.figure.tight_layout()
+        
+        return self.joint_plot
     
-    
-    # def plot_jointplot(self, x, y, hue='group', kind='joint', show=False, title=None, xlabel=None, ylabel=None, **kwargs):
-    #     sns.set_theme(style="whitegrid")
-    #     fig, ax = plt.subplots(figsize=FIG_SIZE, constrained_layout=True)
-    #     if kind == 'scatter':
-    #         sns.scatterplot(data=self.regionprops, x=x, y=y, hue=hue, ax=ax, **kwargs)
-    #     elif kind == 'box':
-    #         sns.boxplot(data=self.regionprops, x=x, y=y, hue=hue, ax=ax, **kwargs)
-    #     elif kind == 'joint':
-    #         sns.jointplot(data=self.regionprops, x=x, y=y, hue=hue, ax=ax, **kwargs)
-    #     #ax.set_title(f'Population Plot: {y} vs {x}')
-    #     ax.legend(loc='best', fontsize='small')
-    #     if title is not None:
-    #         ax.set_title(title)
-    #     if xlabel is not None:
-    #         ax.set_xlabel(xlabel)
-    #     if ylabel is not None:
-    #         ax.set_ylabel(ylabel)
-    #     #plt.xticks(rotation=45, fontsize=8)
-    #     #plt.yticks(fontsize=8)
-    #     self.scatter_plot = fig
-    #     if show:
-    #         plt.show()
-
-    def set_categorical_plot(self, kind, metric, show=False, title=None, xlabel=None, ylabel=None, annotate=True, **kwargs):
-        """REF:
-        seaborn.catplot(data=None, *, x=None, y=None, hue=None, row=None, col=None, kind='strip', estimator='mean',
-        errorbar=('ci', 95), n_boot=1000, seed=None, units=None, weights=None, order=None, hue_order=None, row_order=None, 
-        col_order=None, col_wrap=None, height=5, aspect=1, log_scale=None, native_scale=False, formatter=None, orient=None, 
-        color=None, palette=None, hue_norm=None, legend='auto', legend_out=True, sharex=True, sharey=True, margin_titles=False, 
-        facet_kws=None, ci=<deprecated>, **kwargs)
+    def plot_pairplot(self, columns: List[str] = None, hue: str = "group", 
+                     title: str = None, corner: bool = True, height: float = 2.5,
+                     show: bool = False, save_path: str = None, **kwargs) -> Figure:
         """
-        sns.set_theme(style="whitegrid", palette="flare")
+        Create a pair plot matrix.
         
-        # Plot types that only accept x or y, not both
-        one_axis_plots = {"count", "bar", "point"}
-        if kind in one_axis_plots:
-            self.categorical_plot = sns.catplot(data=self.regionprops, x="group", kind=kind, **kwargs)
-        else:
-            self.categorical_plot = sns.catplot(data=self.regionprops, x="group", y=metric, kind=kind, **kwargs)
+        Args:
+            columns: List of columns to include
+            hue: Column for color grouping
+            title: Plot title
+            corner: Whether to show only lower triangle
+            height: Height of each subplot
+            show: Whether to display the plot
+            save_path: Path to save the plot
+            **kwargs: Additional arguments for sns.pairplot
+            
+        Returns:
+            matplotlib Figure object
+        """
+        # Get columns if not specified
+        if columns is None:
+            columns = self._get_numeric_columns()
+            # Limit to first 6 columns for readability
+            columns = columns[:6]
+        
+        # Set default title
+        title = title or "Pairwise Relationships"
+        
+        # Create pair plot
+        grid = sns.pairplot(
+            data=self.regionprops, vars=columns, hue=hue, 
+            corner=corner, height=height, aspect=1,
+            palette=self.palette, **kwargs
+        )
+        
+        # Style the plot
+        grid.figure.suptitle(title, fontsize=16, y=1.02)
+        
+        # Adjust layout
+        grid.figure.tight_layout()
+        
+        # Store the figure
+        self.pair_plot = grid.figure
+        
+        if save_path:
+            self.pair_plot.savefig(save_path, dpi=300, bbox_inches='tight')
         
         if show:
             plt.show()
-       
-    def get_categorical_plot(self):
-        return self.categorical_plot
-
-    def style_categorical_plot(self, metric, annotate=True, title=None, xlabel=None, ylabel=None, hue=None, row=None, col=None, kind='strip', estimator='mean',
-        errorbar=('ci', 95), n_boot=1000, seed=None, units=None, weights=None, order=None, hue_order=None, row_order=None,
-        col_order=None, col_wrap=None, height=5, aspect=1, log_scale=None, native_scale=False, formatter=None, orient=None,
-        color=None, palette='flare', hue_norm=None, legend='auto', legend_out=True, sharex=True, sharey=True, margin_titles=False,
-        facet_kws=None, **kwargs):
-                
-        if self.categorical_plot is None:
-            print("No categorical plot available. Call set_categorical_plot() first.")
-            return
         
-        # Use FacetGrid methods for styling
-        if title is not None:
-            self.categorical_plot.figure.suptitle(title, fontsize=14)
+        return self.pair_plot
+    
+    def plot_categorical_comparisons(self, metric: str, plot_kind: str = 'box',
+                                   hue: str = None, title: str = None, 
+                                   xlabel: str = None, ylabel: str = None,
+                                   annotate: bool = True, show: bool = False,
+                                   save_path: str = None, **kwargs) -> Figure:
+        """
+        Create categorical comparison plots.
         
-        if xlabel is not None or ylabel is not None:
-            self.categorical_plot.set_axis_labels(
-                xlabel if xlabel else "Group", 
-                ylabel if ylabel else metric
+        Args:
+            metric: Column name for the metric to compare
+            plot_kind: Type of plot ('box', 'violin', 'strip', 'swarm', 'bar', 'point')
+            hue: Additional grouping variable
+            title, xlabel, ylabel: Plot labels
+            annotate: Whether to add statistical annotations
+            show: Whether to display the plot
+            save_path: Path to save the plot
+            **kwargs: Additional arguments for sns.catplot
+            
+        Returns:
+            matplotlib Figure object
+        """
+        # Set default labels
+        xlabel = xlabel or 'Group'
+        ylabel = ylabel or metric.replace('_', ' ').title()
+        title = title or f'{ylabel} by {xlabel}'
+        
+        # Create categorical plot
+        if plot_kind in ['count', 'bar'] and hue is None:
+            # For count plots, set hue to x and disable legend to avoid warning
+            grid = sns.catplot(
+                data=self.regionprops, x="group", hue="group", kind=plot_kind,
+                height=self.fig_size[1], aspect=self.fig_size[0]/self.fig_size[1],
+                palette=self.palette, legend=False, **kwargs
+            )
+        else:
+            grid = sns.catplot(
+                data=self.regionprops, x="group", y=metric, hue=hue, kind=plot_kind,
+                height=self.fig_size[1], aspect=self.fig_size[0]/self.fig_size[1],
+                palette=self.palette, **kwargs
             )
         
-        # Set tick parameters using FacetGrid
-        self.categorical_plot.set_xticklabels(rotation=45, fontsize=8)
-        self.categorical_plot.set_yticklabels(fontsize=8)
+        # Style the plot
+        grid.figure.suptitle(title, fontsize=12, y=1.02)
+        grid.set_axis_labels(xlabel, ylabel)
+        grid.set_xticklabels(rotation=45)
         
-        # Apply tight layout
-        self.categorical_plot.figure.tight_layout()
+        # Add statistical annotations if requested
+        if annotate and plot_kind not in ['count', 'bar']:
+            self._add_statistical_annotations(grid.axes.flat[0], metric)
         
-        if annotate:
-            try:
-                from statannotations.Annotator import Annotator
-                
-                # Get the first (and likely only) axis from the FacetGrid
-                ax = self.categorical_plot.axes.flat[0]
-                
-                # Prepare pairs for annotation (all pairwise group comparisons)
-                groups = self.regionprops['group'].unique()
-                pairs = [(g1, g2) for i, g1 in enumerate(groups) for g2 in groups[i+1:]]
-
-                # Get statistics from the experiment
-                self.experiment.statistics.compare_groups(metric=metric)
-                
-                if hasattr(self.experiment.statistics, "tukey_results") and not self.experiment.statistics.tukey_results.empty:
-                    pvalues = []
-                    for g1, g2 in pairs:
-                        match = self.experiment.statistics.tukey_results[
-                            ((self.experiment.statistics.tukey_results['group1'] == g1) & (self.experiment.statistics.tukey_results['group2'] == g2)) |
-                            ((self.experiment.statistics.tukey_results['group1'] == g2) & (self.experiment.statistics.tukey_results['group2'] == g1))
-                        ]
-                        if not match.empty:
-                            pvalues.append(float(match['p-adj'].values[0]))
-                        else:
-                            pvalues.append(1.0)
-                    
-                    try:
-                        annotator = Annotator(ax, pairs, data=self.regionprops, x="group", y=metric)
-                        annotator.set_pvalues_and_annotate(pvalues, test_short_name="Tukey", text_format="star", loc="inside", verbose=0)
-                    except Exception as e:
-                        print(f"Could not add annotations: {e}")
-                        
-            except ImportError:
-                print("statannotations not available. Skipping annotations.")
+        # Adjust layout
+        grid.figure.tight_layout()
         
-        # Set final title if none provided
-        if title is None:
-            self.categorical_plot.figure.suptitle(f'{metric.title()} Comparison by Group', fontsize=14)
+        # Store the figure
+        self.categorical_plot = grid.figure
         
-    def get_principal_components(self, n_components=3, columns=None):
-        """ Extracts principal components from regionprops dataframe and returns them.
-            Args:
-                n_components (int): Number of principal components to return.
-                columns (list): List of columns to use for PCA (must be numeric).
-            Returns:
-                DataFrame with principal components.
-        """
-        if columns is None:
-            columns = self.regionprops.select_dtypes(include=['float64', 'int64']).columns.tolist()
-            # Remove "group", "label", "index", "sample", "bbox-0", "bbox-1", "bbox-2", "bbox-3", "centroid-0", "centroid-1"
-            columns = [col for col in columns if col not in ["group", "label", "index", "sample", "bbox-0", "bbox-1", "bbox-2", "bbox-3", "centroid-0", "centroid-1"]]
-
-        #pca = PCA(n_components=n_components)
-        components = pca.fit_transform(self.regionprops[columns])
-        return pd.DataFrame(components, columns=[f"PC{i+1}" for i in range(n_components)])
-
-    def plot_pair_plot(self, dataframe, columns=None, show=False, title=None, xlabel=None, ylabel=None, **kwargs):
-        """Plots a pair plot from a regionprops dataframe using group/sample as selectors.
-
-        Args:
-            dataframe: DataFrame with regionprops data.
-            columns (list): List of columns to include in the plot.
-            show (bool): Whether to show the plot.
-            title (str): Title of the plot.
-            xlabel (str): Label for the x-axis.
-            ylabel (str): Label for the y-axis.
-            **kwargs: Additional keyword arguments for the plot.
-        """
-        if columns is None:
-            # Select numerical columns
-            columns = dataframe.select_dtypes(include=['float64', 'int64']).columns.tolist()
-            # Remove "group", "label", "index", "sample", "bbox-0", "bbox-1", "bbox-2", "bbox-3", "centroid-0", "centroid-1"
-            columns = [col for col in columns if col not in ["group", "label", "index", "sample", "bbox-0", "bbox-1", "bbox-2", "bbox-3", "centroid-0", "centroid-1"]]
-
-        # Create the pair plot
-        g = sns.pairplot(data=dataframe, vars=columns, **kwargs)
-
-        # Set titles and labels
-        if title is not None:
-            g.figure.suptitle(title, fontsize=16)
+        if save_path:
+            self.categorical_plot.savefig(save_path, dpi=300, bbox_inches='tight')
         
-        g.set_axis_labels(xlabel if xlabel else columns[0], ylabel if ylabel else columns[1], fontsize=12)
-
         if show:
             plt.show()
+        
+        return self.categorical_plot
+    
+    def _add_statistical_annotations(self, ax, metric: str):
+        """Add statistical significance annotations to plots"""
+        try:
+            from statannotations.Annotator import Annotator
+            
+            # Get unique groups
+            groups = self.regionprops['group'].unique()
+            if len(groups) < 2:
+                return
+            
+            # Create pairs for comparison
+            pairs = [(g1, g2) for i, g1 in enumerate(groups) for g2 in groups[i+1:]]
+            
+            # Get p-values from experiment statistics
+            if (self.experiment and hasattr(self.experiment, 'statistics') and 
+                hasattr(self.experiment.statistics, 'tukey_results')):
+                
+                pvalues = self._extract_pvalues(pairs, metric)
+                
+                if pvalues:
+                    annotator = Annotator(ax, pairs, data=self.regionprops, 
+                                        x="group", y=metric)
+                    annotator.set_pvalues_and_annotate(
+                        pvalues, test_short_name="Tukey", 
+                        text_format="star", loc="inside", verbose=0
+                    )
+                    
+        except ImportError:
+            warnings.warn("statannotations not available. Skipping statistical annotations.")
+        except Exception as e:
+            warnings.warn(f"Could not add statistical annotations: {e}")
+    
+    def _extract_pvalues(self, pairs: List[Tuple], metric: str) -> List[float]:
+        """Extract p-values for group pairs from experiment statistics"""
+        pvalues = []
+        tukey_results = self.experiment.statistics.tukey_results
+        
+        for g1, g2 in pairs:
+            match = tukey_results[
+                ((tukey_results['group1'] == g1) & (tukey_results['group2'] == g2)) |
+                ((tukey_results['group1'] == g2) & (tukey_results['group2'] == g1))
+            ]
+            if not match.empty:
+                pvalues.append(float(match['p-adj'].values[0]))
+            else:
+                pvalues.append(1.0)
+        
+        return pvalues
+    
+    def plot_pca(self, n_components: int = 2, columns: List[str] = None,
+                title: str = None, show: bool = False, save_path: str = None) -> Figure:
+        """
+        Create PCA plot with explained variance.
+        
+        Args:
+            n_components: Number of components to plot (2 or 3)
+            columns: Columns to include in PCA
+            title: Plot title
+            show: Whether to display the plot
+            save_path: Path to save the plot
+            
+        Returns:
+            matplotlib Figure object
+        """
+        try:
+            from sklearn.decomposition import PCA
+            from sklearn.preprocessing import StandardScaler
+        except ImportError:
+            raise ImportError("scikit-learn is required for PCA analysis")
+        
+        # Get columns for PCA
+        if columns is None:
+            columns = self._get_numeric_columns()
+        
+        # Prepare data
+        X = self.regionprops[columns].fillna(0)
+        X_scaled = StandardScaler().fit_transform(X)
+        
+        # Perform PCA
+        pca = PCA(n_components=n_components)
+        components = pca.fit_transform(X_scaled)
+        
+        # Create plot
+        if n_components == 2:
+            fig, ax = plt.subplots(figsize=self.fig_size)
+            scatter = ax.scatter(components[:, 0], components[:, 1], 
+                               c=self.regionprops['group'].astype('category').cat.codes,
+                               cmap='Set2', alpha=0.7)
+            ax.set_xlabel(f'PC1 ({pca.explained_variance_ratio_[0]:.1%} variance)')
+            ax.set_ylabel(f'PC2 ({pca.explained_variance_ratio_[1]:.1%} variance)')
+            
+            # Add legend
+            groups = self.regionprops['group'].unique()
+            for i, group in enumerate(groups):
+                ax.scatter([], [], c=f'C{i}', label=group)
+            ax.legend()
+            
+        elif n_components == 3:
+            fig = plt.figure(figsize=self.fig_size)
+            ax = fig.add_subplot(111, projection='3d')
+            scatter = ax.scatter(components[:, 0], components[:, 1], components[:, 2],
+                               c=self.regionprops['group'].astype('category').cat.codes,
+                               cmap='Set2', alpha=0.7)
+            ax.set_xlabel(f'PC1 ({pca.explained_variance_ratio_[0]:.1%})')
+            ax.set_ylabel(f'PC2 ({pca.explained_variance_ratio_[1]:.1%})')
+            ax.set_zlabel(f'PC3 ({pca.explained_variance_ratio_[2]:.1%})')
+        
+        # Set title
+        title = title or f'PCA Analysis ({pca.explained_variance_ratio_.sum():.1%} total variance)'
+        fig.suptitle(title, fontsize=14)
+        
+        # Store figure
+        self.pca_plot = fig
+        
+        if save_path:
+            fig.savefig(save_path, dpi=300, bbox_inches='tight')
+        
+        if show:
+            plt.show()
+        
+        return fig
+    
+    def save_all_plots(self, directory: str = None, prefix: str = "plot"):
+        """Save all generated plots to files"""
+        plots = {
+            'joint': self.joint_plot,
+            'pair': self.pair_plot,
+            'categorical': self.categorical_plot,
+            'pca': self.pca_plot
+        }
+        
+        for plot_type, plot_obj in plots.items():
+            if plot_obj is not None:
+                if directory:
+                    filename = f"{directory}/{prefix}_{plot_type}.png"
+                else:
+                    filename = asksaveasfilename(
+                        title=f"Save {plot_type.title()} Plot",
+                        defaultextension=".png",
+                        filetypes=[("PNG files", "*.png"), ("PDF files", "*.pdf"), 
+                                 ("SVG files", "*.svg"), ("All files", "*.*")]
+                    )
+                
+                if filename:
+                    plot_obj.savefig(filename, dpi=300, bbox_inches='tight')
+                    print(f"Saved {plot_type} plot to {filename}")
+    
+    def clear_plots(self):
+        """Clear all stored plots to free memory"""
+        plots = [self.joint_plot, self.pair_plot, self.categorical_plot, self.pca_plot]
+        for plot in plots:
+            if plot:
+                plt.close(plot)
+        
+        self.joint_plot = None
+        self.pair_plot = None
+        self.categorical_plot = None
+        self.pca_plot = None
 
-        self.pair_plot = g.figure
-
-    def save_plots(self):
-        """Save all generated plots to files."""
-        if self.joint_plot:
-            filename = asksaveasfilename(title="Save Joint Plot", defaultextension=".png", filetypes=[("PNG files", "*.png"), ("All files", "*.*")])
-            if filename:
-                self.joint_plot.savefig(filename)
-        if self.pair_plot:
-            filename = asksaveasfilename(title="Save Pair Plot", defaultextension=".png", filetypes=[("PNG files", "*.png"), ("All files", "*.*")])
-            if filename:
-                self.pair_plot.savefig(filename)
-        if self.categorical_plot:
-            filename = asksaveasfilename(title="Save Categorical Plot", defaultextension=".png", filetypes=[("PNG files", "*.png"), ("All files", "*.*")])
-            if filename:
-                self.categorical_plot.savefig(filename)
 
 def test_plotting():
-
-    # Generate some test data
+    """Test function for the plotting class"""
+    # Generate test data
+    np.random.seed(42)
     test_data = pd.DataFrame({
-        'group': ['A', 'A', 'B', 'B'],
-        'value': [1, 2, 3, 4],
-        'value2': [20, 25, 26, 27]
+        'group': ['Control'] * 50 + ['Treatment'] * 50,
+        'area': np.random.normal(100, 20, 100),
+        'perimeter': np.random.normal(50, 10, 100),
+        'eccentricity': np.random.uniform(0, 1, 100),
+        'solidity': np.random.uniform(0.8, 1.0, 100)
     })
-
-    # Create a mock ExperimentPlots instance
+    
+    # Create plotting instance
     plots = ExperimentPlots(regionprops=test_data)
+    
+    # Test different plot types
+    print("Testing joint plot...")
+    plots.plot_jointplot(x='area', y='perimeter', show=True)
+    
+    print("Testing pair plot...")
+    plots.plot_pairplot(show=True)
+    
+    print("Testing categorical plot...")
+    plots.plot_categorical_comparisons(metric='area', show=True)
+    
+    print("Testing PCA plot...")
+    plots.plot_pca(show=True)
+    
+    print("All tests completed!")
 
-    # Test joint plot - remove show from kwargs
-    plots.set_joint_plot(x='value', y='value2', kind='kde', show=True)
-    assert plots.joint_plot is not None
-
-    # Test pair plot
-    plots.set_pair_plot(show=True)
-    assert plots.pair_plot is not None
-
-    # Test categorical plot - fix the method call
-    plots.set_categorical_plot(kind='violin', metric='value', show=True, annotate=True)
-    assert plots.categorical_plot is not None
 
 if __name__ == "__main__":
     test_plotting()

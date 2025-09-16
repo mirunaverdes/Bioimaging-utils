@@ -8,15 +8,57 @@ from aicsimageio import AICSImage, imread
 
 # Class that extends AICSImage to add functions to output data compatible with cellpose
 class dash_AICSImage(AICSImage):
-    def __init__(self, image, reader = None, reconstruct_mosaic = True, fs_kwargs = ..., **kwargs):
+    def __init__(self, image, segment_channels=None, intensity_channels=None, reader = None, reconstruct_mosaic = True, fs_kwargs = ..., **kwargs):
         super().__init__(image, reader, reconstruct_mosaic, fs_kwargs, **kwargs)  
-    
-    def to_cellpose_format(self):
+        
+    def to_cellpose_format(self, segmentation_channels):
         """
         Convert the AICSImage instance to a format compatible with Cellpose.
         """
-        # Implement the conversion logic here
-        pass
+        # Get ALL channel data at once
+        full_img = self.get_image_data("TCYX")  # Single read
+        
+        # Use views/slices instead of copying
+        seg_data = full_img[:, segmentation_channels]  # View, not copy
+                
+        # Convert to list for Cellpose
+        seg_list = [seg_data[t] for t in range(seg_data.shape[0])]  # Views of time points
+
+        return seg_list
+    def get_regionprops_input(self, intensity_channels = None, masks = None):
+        """
+        Convert the AICSImage instance to a format compatible with regionprops.
+
+        Arguments:
+            intensity_channels (list/touple of channel indexes): list of channels needed for intensity data
+            masks (Optional ndarray/list of ndarrays): masks that will be used for regionprops. If provided,
+                compatibility of masks with intensity will be checked.
+        """
+        if intensity_channels is None:
+            raise ValueError("No channels were provided to extract intensity data")
+        
+        # Get ALL channel data at once
+        full_img = self.get_image_data("TCYX")  # Single read
+        
+        intensity_data = full_img[:, intensity_channels] if intensity_channels else None
+        
+        # Convert to list for regionprops
+        intensity_list = [intensity_data[t] for t in range(intensity_data.shape[0])] if intensity_data is not None else None
+
+        if intensity_list is None:
+            raise ValueError("There is no intensity data available.")
+        elif masks is not None:
+            #Check compatibility
+            intensity_list_fixed = intensity_list
+            masks_fixed = masks
+            return intensity_list_fixed, masks_fixed
+        
+        return intensity_list
+    def get_trackastra_format(self, masks):
+        """
+
+        """
+
 
 def read_lif_to_xarray_with_metadata(file_path, dims=None, channel_names=None, dask=False):
     """
