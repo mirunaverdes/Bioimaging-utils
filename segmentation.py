@@ -20,7 +20,7 @@ from skimage.filters import gaussian, median
 from pandas import DataFrame
 from tqdm import tqdm
 from readlif.reader import LifFile  
-import xarray as xr
+#import xarray as xr
 from aicsimageio import AICSImage
 from utils import crop_large_image, stitch_images, convert_to_minimal_format, namefile, find_channel_axis
 #from skimage.restoration import gaussian_denoise, estimate_sigma
@@ -588,7 +588,257 @@ def process_files_multichannel_2(
             except Exception as e:
                 print(f"Error saving combined regionprops for file {file_path}: {e}")
 
+@timeit
+def process_files_multichannel_3(
+    files, model, model_diameter, savedir,
+    get_regionprops=True, get_tracking=True, segment_channels=[1, 0], intensity_channels=None, 
+    subset=slice(None), chunksize=[1, 1], scene_identifiers=None, time_subset=slice(None)
+):
+    """
+    Processes a list of image files (2D multichannel timelapses) readable with AICSImage, segments them using the Cellpose model,
+    tracks them using Trackastra, and saves the masks, tracking data, and region properties to the specified directory.
+    
+    Args:
+        files (list): List of file paths to process.
+        model (CellposeModel): The Cellpose model to use for segmentation.
+        model_diameter (int): The diameter of the cells for the model.
+        savedir (str): Directory where the masks, tracking data, and region properties will be saved.
+        get_regionprops (bool): Whether to compute and save region properties.
+        get_tracking (bool): Whether to perform cell tracking using Trackastra.
+        segment_channels (list): List of channel indices to use for segmentation.
+        intensity_channels (list): List of channel indices to use for regionprops intensity metrics.
+        subset (slice): Slice object to select a subset of images from the cropped image list.
+        chunksize (list): List of chunk sizes for processing the images.
+        scene_identifiers (list): List of scene identifiers to process. If None, all scenes will be processed.
+        time_subset (slice): Slice object to select a subset of time points.
+    """
+    # Import tracking functions
+    from tracking import track_Trackastra, preprocess_masks
+    import pickle
+    
+    for file_path in tqdm(files, desc="Processing files", unit="file"):
+        
+        try:
+            img = AICSImage(file_path)
+        except:
+            if file_path.endswith(".npy"):
+                data = np.load(file_path)
+                img = AICSImage(data)
+        
+        # Check if the image has multiple scenes
+        if len(img.scenes) == 0:
+            print(f"No scenes found in {file_path}. Skipping this file.")
+            continue
+            
+        scenes = img.scenes if scene_identifiers is None else [scene for scene in img.scenes if any(s in scene for s in scene_identifiers)]
+        
+        # Initialize list to collect all regionprops from all scenes for this file
+        all_scenes_props = []
+        
+        for scene in scenes:
+            img.set_scene(scene)
+            
+            # Create the filepaths for saving
+            base = os.path.basename(file_path).split('.')[0]
+            masks_filepath = namefile(savedir, base, prefix=f"masks-{model_diameter}", suffix=scene, ext="npy")
+            image_filepath = namefile(savedir, base, prefix="image", suffix=scene, ext="npy")
 
+            # Get ALL channel data at once
+            full_img = img.get_image_data("TCYX")  # Single read
+            
+            # Use views/slices instead of copying
+            seg_data = full_img[:, segment_channels]  # View, not copy
+            intensity_data = full_img[:, intensity_channels] if intensity_channels else None
+            
+            # Convert to list for Cellpose
+            seg_list = [seg_data[t] for t in range(seg_data.shape[0])]  # Views of time points
+            
+            # Only chunk if the image is not a timelapse
+            if chunksize != [1, 1] and len(seg_list) == 1:
+                print(f"Processing image in chunks of size {chunksize}...")
+                seg_list = crop_large_image(seg_data, n_segments_x=chunksize[0], n_segments_y=chunksize[1])
+                try:
+                    seg_list = seg_list[subset]
+                except Exception as e:
+                    print(f"Error occurred while applying subset: {e}")
+
+            # Segment
+            print(f"🔬 Segmenting {len(seg_list)} frames...")
+            masks, _, _ = model.eval(
+                seg_list,
+                diameter=model_diameter
+            )
+            
+            # Remove masks touching edges
+            masks = [clear_border(mask) for mask in masks] if isinstance(masks, list) else clear_border(masks)
+           
+            # Handle chunked processing for masks
+            if chunksize != [1, 1]:
+                # If no subset is specified, and image was tiled, stitch all masks together
+                masks = stitch_images(masks, n_segments_x=chunksize[0], n_segments_y=chunksize[1])
+                # Relabel masks to avoid duplicate labels after stitching
+                masks = label(masks)
+            
+            # Convert to minimal format and ensure it's a proper array
+            masks = convert_to_minimal_format(masks)
+            
+            # Save original masks
+            np.save(masks_filepath, masks)
+            
+            # Prepare images for tracking (convert to list if needed)
+            if isinstance(seg_list[0], np.ndarray) and seg_list[0].ndim == 3:
+                # Multi-channel images - take first channel for tracking
+                images_for_tracking = [img_frame[0] for img_frame in seg_list]
+            else:
+                # Single channel images
+                images_for_tracking = seg_list
+            
+            # Save images for tracking
+            np.save(image_filepath, np.array(images_for_tracking))
+            
+            # Prepare masks for tracking
+            if masks.ndim == 3:
+                masks_for_tracking = [masks[t] for t in range(masks.shape[0])]
+            else:
+                masks_for_tracking = [masks]
+            
+            # Tracking
+            if get_tracking and len(masks_for_tracking) > 1:
+                try:
+                    print(f"🔗 Tracking {len(masks_for_tracking)} frames...")
+                    
+                    # Preprocess masks for tracking
+                    masks_preprocessed = preprocess_masks(masks_for_tracking)
+                    
+                    # Perform tracking
+                    track_graph, ctc_tracks, masks_tracked, napari_tracks = track_Trackastra(
+                        images_for_tracking, 
+                        masks_preprocessed
+                    )
+                    
+                    # Save tracking results
+                    tracking_base = f"tracked_{base}_{scene}"
+                    
+                    # Save track graph
+                    with open(namefile(savedir,tracking_base,'','graph','pkl'), 'wb') as f:
+                        pickle.dump(track_graph, f)
+                    
+                    # Save CTC tracks
+                    ctc_tracks.to_csv(namefile(savedir,tracking_base,'','ctc','csv'), index=False)
+
+                    # Save tracked masks
+                    np.save(namefile(savedir,tracking_base,'','masks','npy'), masks_tracked)
+
+                    # Save napari tracks
+                    #np.save(namefile(savedir,tracking_base,'','napari_tracks','npy'), napari_tracks)
+
+                    print(f"✓ Tracking completed and saved for scene {scene}")
+                    
+                    # Use tracked masks for regionprops if tracking was successful
+                    final_masks = masks_tracked
+                    
+                except Exception as e:
+                    print(f"❌ Tracking failed for scene {scene}: {e}")
+                    print("Using original masks for regionprops...")
+                    final_masks = masks
+            else:
+                print("⏭️ Skipping tracking (disabled or single frame)")
+                final_masks = masks
+            
+            # Calculate regionprops using final masks (tracked or original)
+            if get_regionprops:
+                try:
+                    print(f"📊 Calculating region properties...")
+                    
+                    # Get spacing information
+                    spacing = (img.physical_pixel_sizes.Y, img.physical_pixel_sizes.X)
+                    
+                    # Prepare masks for regionprops
+                    if final_masks.ndim == 3:
+                        masks_list = [final_masks[t] for t in range(final_masks.shape[0])]
+                    else:
+                        masks_list = [final_masks]
+                    
+                    # Prepare intensity images for regionprops
+                    if chunksize != [1, 1] and subset != slice(None):
+                        intensity_list = crop_large_image(intensity_data, n_segments_x=chunksize[0], n_segments_y=chunksize[1])
+                        intensity_list = intensity_list[subset]
+                    else:
+                        if intensity_data is not None:
+                            intensity_list = [np.moveaxis(intensity_data[t], 0, -1) for t in range(intensity_data.shape[0])]
+                        else:
+                            intensity_list = [None] * len(masks_list)
+                    
+                    # Check and fix shapes
+                    masks_list, intensity_list = check_and_fix_shapes(masks_list, intensity_list)
+                    
+                    # Calculate regionprops for this scene
+                    scene_props_df = calculate_regionprops(
+                        masks=masks_list,
+                        intensity_images=intensity_list,
+                        file_path=file_path,
+                        scene=scene,
+                        spacing=spacing,
+                        channel_names=[img.channel_names[s] for s in segment_channels],
+                        physical_pixel_sizes=img.physical_pixel_sizes
+                    )
+                    
+                    # Add tracking information to regionprops if available
+                    if get_tracking and 'ctc_tracks' in locals():
+                        scene_props_df['has_tracking_data'] = True
+                        # You could merge tracking IDs here if needed
+                        # scene_props_df = merge_tracking_regionprops(scene_props_df, ctc_tracks)
+                    else:
+                        scene_props_df['has_tracking_data'] = False
+                    
+                    # Add to collection if successful
+                    if scene_props_df is not None:
+                        all_scenes_props.append(scene_props_df)
+                        print(f"✓ Region properties calculated for scene {scene}")
+                    
+                except Exception as e:
+                    print(f"❌ Error in regionprops calculation for scene {scene}: {e}")
+        
+        # Save combined regionprops for all scenes of this file
+        if get_regionprops and all_scenes_props:
+            try:
+                # Combine all scenes for this file
+                combined_props_df = concat(all_scenes_props, ignore_index=True)
+                
+                # Save using the separate function
+                save_regionprops(combined_props_df, savedir, base)
+                print(f"✓ Combined region properties saved for {base}")
+                
+            except Exception as e:
+                print(f"❌ Error saving combined regionprops for file {file_path}: {e}")
+
+        print(f"🎉 Processing completed for {os.path.basename(file_path)}")
+
+
+def merge_tracking_regionprops(regionprops_df, ctc_tracks):
+    """
+    Helper function to merge tracking information with regionprops data.
+    
+    Args:
+        regionprops_df (pd.DataFrame): DataFrame containing region properties
+        ctc_tracks (pd.DataFrame): DataFrame containing tracking information
+        
+    Returns:
+        pd.DataFrame: Merged DataFrame with tracking IDs
+    """
+    try:
+        # Merge based on frame and label (this might need adjustment based on your data structure)
+        # This is a simplified merge - you may need to adapt based on your specific data format
+        merged_df = regionprops_df.merge(
+            ctc_tracks[['frame', 'label', 'track_id']], 
+            left_on=['frame', 'label'], 
+            right_on=['frame', 'label'], 
+            how='left'
+        )
+        return merged_df
+    except Exception as e:
+        print(f"Warning: Could not merge tracking data with regionprops: {e}")
+        return regionprops_df
 
 def user_interface():
     import customtkinter as ctk
@@ -597,12 +847,12 @@ def user_interface():
     
     # Set appearance mode and color theme
     ctk.set_appearance_mode("dark")
-    ctk.set_default_color_theme("blue")
+    ctk.set_default_color_theme("green")
     
     app = ctk.CTk()
-    app.geometry("1000x800")
-    app.title("DasHund Segmentation")
-    app.minsize(800, 600)
+    app.geometry("1000x900")  # Increased height for tracking section
+    app.title("🌭 dashUND Segmentation & Tracking")
+    app.minsize(800, 700)
     
     # Configure grid weights for responsive design
     app.grid_columnconfigure(0, weight=1)
@@ -616,7 +866,7 @@ def user_interface():
     # Title with better styling
     title_label = ctk.CTkLabel(
         main_scrollable, 
-        text="🧬 DasHund Segmentation", 
+        text="🌭 dashUND Segmentation & Tracking", 
         font=ctk.CTkFont(size=28, weight="bold")
     )
     title_label.grid(row=0, column=0, pady=(10, 20))
@@ -636,6 +886,7 @@ def user_interface():
     intensity_channels_vars = []
     model_diameter_var = ctk.IntVar(value=30)
     get_regionprops_var = ctk.BooleanVar(value=True)
+    get_tracking_var = ctk.BooleanVar(value=False)  # New tracking variable
     custom_model_var = ctk.BooleanVar(value=False)
     model_path_var = ctk.StringVar()
     savedir_var = ctk.StringVar()
@@ -710,6 +961,7 @@ def user_interface():
             savedir_var.set(directory)
             # Truncate long paths for display
             display_path = os.path.basename(directory) if len(directory) < 50 else f"...{directory[-40:]}"
+
             savedir_label.configure(text=f"💾 Save to: {display_path}")
             update_status("✓ Save directory selected", "green")
             check_ready_to_process()
@@ -821,18 +1073,54 @@ def user_interface():
     )
     model_path_label.grid(row=3, column=0, columnspan=2, pady=5)
     
-    # Regionprops checkbox with better styling
+    # Analysis Options Section
+    analysis_section = ctk.CTkFrame(main_scrollable, corner_radius=15)
+    analysis_section.grid(row=4, column=0, padx=20, pady=10, sticky="ew", ipadx=20, ipady=15)
+    analysis_section.grid_columnconfigure(0, weight=1)
+    
+    analysis_label = ctk.CTkLabel(
+        analysis_section, 
+        text="📊 Analysis Options", 
+        font=ctk.CTkFont(size=20, weight="bold")
+    )
+    analysis_label.grid(row=0, column=0, pady=(0, 15))
+    
+    # Analysis options frame
+    analysis_options_frame = ctk.CTkFrame(analysis_section, fg_color="transparent")
+    analysis_options_frame.grid(row=1, column=0, sticky="ew", padx=10)
+    analysis_options_frame.grid_columnconfigure((0, 1), weight=1)
+    
+    # Regionprops checkbox
     regionprops_check = ctk.CTkCheckBox(
-        model_section, 
-        text="📊 Calculate region properties", 
+        analysis_options_frame, 
+        text="📈 Calculate region properties", 
         variable=get_regionprops_var,
         font=ctk.CTkFont(size=13)
     )
-    regionprops_check.grid(row=4, column=0, columnspan=2, pady=15)
+    regionprops_check.grid(row=0, column=0, sticky="w", padx=10, pady=10)
+    
+    # Tracking checkbox
+    tracking_check = ctk.CTkCheckBox(
+        analysis_options_frame, 
+        text="🔗 Perform cell tracking", 
+        variable=get_tracking_var,
+        font=ctk.CTkFont(size=13)
+    )
+    tracking_check.grid(row=0, column=1, sticky="w", padx=10, pady=10)
+    
+    # Tracking info label
+    tracking_info_label = ctk.CTkLabel(
+        analysis_section, 
+        text="ℹ️ Tracking requires multi-frame time-lapse data. Uses Trackastra for linking cells across frames.", 
+        font=ctk.CTkFont(size=11, slant="italic"),
+        text_color="gray",
+        wraplength=800
+    )
+    tracking_info_label.grid(row=2, column=0, pady=5)
     
     # Channel Selection Section
     channel_section = ctk.CTkFrame(main_scrollable, corner_radius=15)
-    channel_section.grid(row=4, column=0, padx=20, pady=10, sticky="ew", ipadx=20, ipady=15)
+    channel_section.grid(row=5, column=0, padx=20, pady=10, sticky="ew", ipadx=20, ipady=15)
     channel_section.grid_columnconfigure(0, weight=1)
     
     channel_label = ctk.CTkLabel(
@@ -874,7 +1162,7 @@ def user_interface():
     
     # Scene Selection Section
     scene_section = ctk.CTkFrame(main_scrollable, corner_radius=15)
-    scene_section.grid(row=5, column=0, padx=20, pady=10, sticky="ew", ipadx=20, ipady=15)
+    scene_section.grid(row=6, column=0, padx=20, pady=10, sticky="ew", ipadx=20, ipady=15)
     scene_section.grid_columnconfigure(0, weight=1)
     
     scene_label = ctk.CTkLabel(
@@ -913,6 +1201,22 @@ def user_interface():
             image = AICSImage(file_path)
             channels = image.channel_names
             scenes = image.scenes
+            
+            # Check if it's a time-lapse for tracking
+            time_points = image.dims.T
+            if time_points > 1:
+                tracking_info_label.configure(
+                    text=f"ℹ️ Time-lapse detected: {time_points} frames. Tracking is available for this dataset.",
+                    text_color="green"
+                )
+                tracking_check.configure(state="normal")
+            else:
+                tracking_info_label.configure(
+                    text="ℹ️ Single time-point detected. Tracking requires multi-frame time-lapse data.",
+                    text_color="orange"
+                )
+                tracking_check.configure(state="disabled")
+                get_tracking_var.set(False)
             
             # Clear previous channel widgets
             for widget in seg_channel_container.winfo_children():
@@ -964,7 +1268,7 @@ def user_interface():
     
     # Process Button Section - Always visible at bottom
     process_section = ctk.CTkFrame(main_scrollable, corner_radius=15, fg_color="transparent")
-    process_section.grid(row=6, column=0, padx=20, pady=30, sticky="ew")
+    process_section.grid(row=7, column=0, padx=20, pady=30, sticky="ew")
     process_section.grid_columnconfigure(0, weight=1)
     
     def check_ready_to_process():
@@ -973,8 +1277,18 @@ def user_interface():
         has_files = len(selected_files) > 0
         has_savedir = bool(savedir_var.get())
         
+        # Update button text based on selected options
+        if get_tracking_var.get() and get_regionprops_var.get():
+            action_text = "🚀 Start Segmentation, Tracking & Analysis"
+        elif get_tracking_var.get():
+            action_text = "🚀 Start Segmentation & Tracking"
+        elif get_regionprops_var.get():
+            action_text = "🚀 Start Segmentation & Analysis"
+        else:
+            action_text = "🚀 Start Segmentation Only"
+        
         if has_files and has_savedir:
-            process_button.configure(state="normal", text="🚀 Start Processing")
+            process_button.configure(state="normal", text=action_text)
             ready_label.configure(text="✓ Ready to process", text_color="green")
         else:
             process_button.configure(state="disabled", text="⏳ Configure settings first")
@@ -1004,9 +1318,32 @@ def user_interface():
             messagebox.showerror("Error", "No save directory selected!")
             return
         
+        # Check tracking requirements
+        if get_tracking_var.get():
+            try:
+                # Quick check if first file is time-lapse
+                test_img = AICSImage(selected_files[0])
+                if test_img.dims.T <= 1:
+                    if not messagebox.askyesno("Tracking Warning", 
+                        "Selected files appear to be single time-point images. "
+                        "Tracking requires time-lapse data.\n\n"
+                        "Continue with tracking disabled?"):
+                        return
+                    get_tracking_var.set(False)
+            except Exception as e:
+                messagebox.showwarning("Warning", f"Could not verify time-lapse data: {e}")
+        
         # Confirmation dialog
         file_count = len(selected_files)
-        confirm_msg = f"Process {file_count} file{'s' if file_count > 1 else ''}?\n\nThis may take several minutes."
+        analysis_options = []
+        if get_regionprops_var.get():
+            analysis_options.append("region properties")
+        if get_tracking_var.get():
+            analysis_options.append("cell tracking")
+        
+        analysis_text = " and ".join(analysis_options) if analysis_options else "segmentation only"
+        confirm_msg = f"Process {file_count} file{'s' if file_count > 1 else ''} with {analysis_text}?\n\nThis may take several minutes."
+        
         if not messagebox.askyesno("Confirm Processing", confirm_msg):
             return
         
@@ -1034,19 +1371,34 @@ def user_interface():
             # Close the app window
             app.destroy()
             
-            # Process files
-            process_files_multichannel_2(
-                selected_files, 
-                model, 
-                model_diameter_var.get(), 
-                savedir_var.get(),
-                get_regionprops=get_regionprops_var.get(),
-                segment_channels=[segment_channel_index],
-                intensity_channels=intensity_channel_indices,
-                subset=slice(None),
-                chunksize=[1, 1],
-                scene_identifiers=scene_ids
-            )
+            # Choose processing function based on tracking option
+            if get_tracking_var.get():
+                process_files_multichannel_3(
+                    selected_files, 
+                    model, 
+                    model_diameter_var.get(), 
+                    savedir_var.get(),
+                    get_regionprops=get_regionprops_var.get(),
+                    get_tracking=True,
+                    segment_channels=[segment_channel_index],
+                    intensity_channels=intensity_channel_indices,
+                    subset=slice(None),
+                    chunksize=[1, 1],
+                    scene_identifiers=scene_ids
+                )
+            else:
+                process_files_multichannel_2(
+                    selected_files, 
+                    model, 
+                    model_diameter_var.get(), 
+                    savedir_var.get(),
+                    get_regionprops=get_regionprops_var.get(),
+                    segment_channels=[segment_channel_index],
+                    intensity_channels=intensity_channel_indices,
+                    subset=slice(None),
+                    chunksize=[1, 1],
+                    scene_identifiers=scene_ids
+                )
             
         except Exception as e:
             messagebox.showerror("Error", f"Processing failed: {str(e)}")
@@ -1057,7 +1409,7 @@ def user_interface():
         command=start_processing,
         font=ctk.CTkFont(size=18, weight="bold"),
         height=50,
-        width=300,
+        width=400,
         state="disabled"
     )
     process_button.grid(row=1, column=0, pady=10)
@@ -1065,15 +1417,13 @@ def user_interface():
     # Initialize the ready check
     check_ready_to_process()
     
-    # Bind file selection changes to ready check
-    def on_file_change():
-        app.after(100, check_ready_to_process)  # Delay to ensure UI updates
-    
-    # Add trace to savedir_var
+    # Bind variables to ready check
+    get_tracking_var.trace('w', lambda *args: check_ready_to_process())
+    get_regionprops_var.trace('w', lambda *args: check_ready_to_process())
     savedir_var.trace('w', lambda *args: check_ready_to_process())
     
     app.mainloop()
 
 if __name__ == "__main__":
     user_interface()
-    
+
