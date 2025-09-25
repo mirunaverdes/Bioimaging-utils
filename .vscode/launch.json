@@ -1,0 +1,102 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug Experiment Statistics - Timelapse Test Data",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/experiment_statistics.py",
+            "args": [
+                "timelapse"
+            ],
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "env": {},
+            "envFile": "${workspaceFolder}/.env",
+            "python": "${command:python.interpreterPath}",
+            "justMyCode": true,
+            "stopOnEntry": false
+        },
+        {
+            "name": "Debug Experiment Statistics - Real Data",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/experiment_statistics.py",
+            "args": [
+                "real"
+            ],
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "env": {},
+            "envFile": "${workspaceFolder}/.env",
+            "python": "${command:python.interpreterPath}",
+            "justMyCode": true,
+            "stopOnEntry": false
+        },
+        {
+            "name": "Debug Experiment Statistics - Synthetic Data",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/experiment_statistics.py",
+            "args": [
+                "synthetic"
+            ],
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "env": {},
+            "envFile": "${workspaceFolder}/.env",
+            "python": "${command:python.interpreterPath}",
+            "justMyCode": true,
+            "stopOnEntry": false
+        },
+        {
+            "name": "Debug Experiment Statistics - Benchmark",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/experiment_statistics.py",
+            "args": [
+                "benchmark"
+            ],
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "env": {},
+            "envFile": "${workspaceFolder}/.env",
+            "python": "${command:python.interpreterPath}",
+            "justMyCode": true,
+            "stopOnEntry": false
+        },
+        {
+            "name": "Debug Experiment Statistics - All Tests",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/experiment_statistics.py",
+            "args": [
+                "all"
+            ],
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "env": {},
+            "envFile": "${workspaceFolder}/.env",
+            "python": "${command:python.interpreterPath}",
+            "justMyCode": true,
+            "stopOnEntry": false
+        },
+        {
+            "name": "Debug Experiment Statistics - Default",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/experiment_statistics.py",
+            "args": [],
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "env": {},
+            "envFile": "${workspaceFolder}/.env",
+            "python": "${command:python.interpreterPath}",
+            "justMyCode": true,
+            "stopOnEntry": false
+        }
+    ]
+}

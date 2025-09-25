@@ -193,3 +193,8 @@ cython_debug/
 .cursorignore
 .cursorindexingignore
 regionprops_plots.py
+.\Test_outputs\*
+# Test outputs directory
+Test_outputs/
+# Test inputs directory
+Test_inputs/

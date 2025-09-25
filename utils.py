@@ -227,6 +227,29 @@ def convert_to_minimal_format(masks:np.ndarray):
         masks = np.asarray(masks)
     return masks
 
+def namedir(savedir:str, base:str):
+    """
+    Generates a unique directory name for a specified base name in a given directory and then creates the new dir.
+    Args:
+        savedir (str): Root path for the new dir
+        base (str): Name of the directory to be created
+    """
+    if not os.path.exists(savedir):
+        raise ValueError(f"The specified directory {savedir} does not exist.")
+    illegal_chars = ['<', '>', ':', '"', '/', '\\', '|', '?', '*', ' ','.']
+    for char in illegal_chars:
+        base = base.replace(char, '_')
+    path = os.path.join(savedir,base)
+    if os.path.exists(path):
+        index=1
+        base_new = base + f"_{index}"
+        while os.path.exists(os.path.join(savedir,base_new)):
+            index += 1
+            base_new = base + f"_{index}"
+        path = os.path.join(savedir,base_new)
+
+    os.makedirs(path, exist_ok=True)
+    return path
 
 
 def namefile(savedir, base, prefix, suffix, ext):

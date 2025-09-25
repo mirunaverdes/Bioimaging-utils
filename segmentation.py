@@ -24,7 +24,7 @@ from readlif.reader import LifFile
 from aicsimageio import AICSImage
 from utils import crop_large_image, stitch_images, convert_to_minimal_format, namefile, find_channel_axis
 #from skimage.restoration import gaussian_denoise, estimate_sigma
-PROPERTIES_ALL = ('label', 'area', 'perimeter', 'centroid', 'intensity_mean', 'intensity_min', 'intensity_max', 'intensity_std','bbox', 'eccentricity', 'solidity', 'orientation', 'major_axis_length', 'minor_axis_length')
+PROPERTIES_ALL = ('label', 'area', 'pe                      rimeter', 'centroid', 'intensity_mean', 'intensity_min', 'intensity_max', 'intensity_std','bbox', 'eccentricity', 'solidity', 'orientation', 'major_axis_length', 'minor_axis_length')
 PROPERTIES_MINIMAL = ('label', 'area', 'perimeter', 'centroid', 'intensity_mean', 'intensity_min', 'intensity_max', 'intensity_std')
 PROPERTIES_NO_INTENSITY = ('label', 'area', 'perimeter', 'centroid', 'bbox', 'eccentricity', 'solidity', 'orientation', 'major_axis_length', 'minor_axis_length')   
 REGIONPROPS_FOR_TABLE = (

@@ -20,7 +20,7 @@ class ScatterControlsFrame(ctk.CTkFrame):
         self.experiment = experiment
         self.plot_frame = plot_frame
         self.update_callback = update_callback
-        self.plots = None  # Will hold ExperimentPlots instance
+        self.plots: ExperimentPlots = None  # Will hold ExperimentPlots instance
 
         # Configure grid weights
         self.grid_columnconfigure((1, 3, 5), weight=1)
@@ -127,24 +127,24 @@ class ScatterControlsFrame(ctk.CTkFrame):
     def save_scatterplot(self):
         """Save scatter plot with error handling"""
         try:
-            filename = asksaveasfilename(
+            filepath = asksaveasfilename(
                 defaultextension=".png", 
                 filetypes=[("PNG files", "*.png"), ("PDF files", "*.pdf"), 
                           ("SVG files", "*.svg"), ("All files", "*.*")]
             )
-            if filename and self.plots and hasattr(self.plots, 'joint_plot') and self.plots.joint_plot:
-                self.plots.joint_plot.savefig(filename, dpi=300, bbox_inches='tight')
-                print(f"Plot saved to: {filename}")
+            if filepath and self.plots and hasattr(self.plots, 'joint_plot') and self.plots.joint_plot:
+                self.plots.save_publication_plot(self.plots.joint_plot, filepath=filepath)
+                print(f"Plot saved to: {filepath}")
         except Exception as e:
             print(f"Error saving plot: {e}")
 
 class CategoricalControlsFrame(ctk.CTkFrame):
     def __init__(self, master, experiment, plot_frame, update_callback):
         super().__init__(master, corner_radius=15)
-        self.experiment = experiment
+        self.experiment: Experiment = experiment
         self.plot_frame = plot_frame
         self.update_callback = update_callback
-        self.plots = None  # Will hold ExperimentPlots instance
+        self.plots : ExperimentPlots = None  # Will hold ExperimentPlots instance
 
         # Configure grid weights
         self.grid_columnconfigure((1, 3), weight=1)
@@ -244,14 +244,14 @@ class CategoricalControlsFrame(ctk.CTkFrame):
     def save_cat_plot(self):
         """Save categorical plot with error handling"""
         try:
-            filename = asksaveasfilename(
+            filepath = asksaveasfilename(
                 defaultextension=".png", 
                 filetypes=[("PNG files", "*.png"), ("PDF files", "*.pdf"), 
                           ("SVG files", "*.svg"), ("All files", "*.*")]
             )
-            if filename and self.plots and hasattr(self.plots, 'categorical_plot') and self.plots.categorical_plot:
-                self.plots.categorical_plot.savefig(filename, dpi=300, bbox_inches='tight')
-                print(f"Plot saved to: {filename}")
+            if filepath and self.plots and hasattr(self.plots, 'categorical_plot') and self.plots.categorical_plot:
+                self.plots.save_publication_plot(self.plots.categorical_plot, filepath=filepath)
+                print(f"Plot saved to: {filepath}")
         except Exception as e:
             print(f"Error saving plot: {e}")
 
@@ -261,7 +261,7 @@ class PairplotControlsFrame(ctk.CTkFrame):
         self.experiment = experiment
         self.plot_frame = plot_frame
         self.update_callback = update_callback
-        self.plots = None  # Will hold ExperimentPlots instance
+        self.plots : ExperimentPlots = None  # Will hold ExperimentPlots instance
 
         # Configure grid weights
         self.grid_columnconfigure((1, 3), weight=1)
@@ -289,7 +289,8 @@ class PairplotControlsFrame(ctk.CTkFrame):
         self.columns_info_label.grid(row=1, column=0, columnspan=6, pady=5)
 
         # Scrollable frame for column checkboxes
-        self.columns_frame = ctk.CTkScrollableFrame(self, height=100)
+        self.columns_frame = ctk.CTkScrollableFrame(self, height=40)
+        self.columns_frame._scrollbar.configure(height=5)  # Shorter scrollbar
         self.columns_frame.grid(row=2, column=0, columnspan=6, sticky="ew", padx=10, pady=5)
 
         # Options row
@@ -356,7 +357,7 @@ class PairplotControlsFrame(ctk.CTkFrame):
                 variable=var,
                 font=ctk.CTkFont(size=11)
             )
-            checkbox.pack(anchor="w", padx=5, pady=2)
+            checkbox.grid(row=i//5, column=i%5, sticky="w", padx=5, pady=2)
 
     def get_selected_columns(self):
         """Get list of selected columns"""
@@ -365,14 +366,14 @@ class PairplotControlsFrame(ctk.CTkFrame):
     def save_pairplot(self):
         """Save pairplot with error handling"""
         try:
-            filename = asksaveasfilename(
+            filepath = asksaveasfilename(
                 defaultextension=".png", 
                 filetypes=[("PNG files", "*.png"), ("PDF files", "*.pdf"), 
                           ("SVG files", "*.svg"), ("All files", "*.*")]
             )
-            if filename and self.plots and hasattr(self.plots, 'pair_plot') and self.plots.pair_plot:
-                self.plots.pair_plot.savefig(filename, dpi=300, bbox_inches='tight')
-                print(f"Plot saved to: {filename}")
+            if filepath and self.plots and hasattr(self.plots, 'pair_plot') and self.plots.pair_plot:
+                self.plots.save_publication_plot(self.plots.pair_plot, filepath=filepath)
+                print(f"Plot saved to: {filepath}")
         except Exception as e:
             print(f"Error saving plot: {e}")
 
@@ -382,7 +383,7 @@ class PCAControlsFrame(ctk.CTkFrame):
         self.experiment = experiment
         self.plot_frame = plot_frame
         self.update_callback = update_callback
-        self.plots = None  # Will hold ExperimentPlots instance
+        self.plots : ExperimentPlots = None  # Will hold ExperimentPlots instance
 
         # Variables
         self.n_components_var = StringVar(value="2")
@@ -448,16 +449,293 @@ class PCAControlsFrame(ctk.CTkFrame):
     def save_pca_plot(self):
         """Save PCA plot with error handling"""
         try:
-            filename = asksaveasfilename(
+            filepath = asksaveasfilename(
                 defaultextension=".png", 
                 filetypes=[("PNG files", "*.png"), ("PDF files", "*.pdf"), 
                           ("SVG files", "*.svg"), ("All files", "*.*")]
             )
-            if filename and self.plots and hasattr(self.plots, 'pca_plot') and self.plots.pca_plot:
-                self.plots.pca_plot.savefig(filename, dpi=300, bbox_inches='tight')
-                print(f"Plot saved to: {filename}")
+            if filepath and self.plots and hasattr(self.plots, 'pca_plot') and self.plots.pca_plot:
+                self.plots.save_publication_plot(self.plots.pca_plot, filepath=filepath)
+                print(f"Plot saved to: {filepath}")
         except Exception as e:
             print(f"Error saving plot: {e}")
+
+class TimeSeriesControlsFrame(ctk.CTkFrame):
+    def __init__(self, master, experiment, plot_frame, update_callback):
+        super().__init__(master, corner_radius=15)
+        self.experiment = experiment
+        self.plot_frame = plot_frame
+        self.update_callback = update_callback
+        self.plots : ExperimentPlots = None  # Will hold ExperimentPlots instance
+
+        # Configure grid weights
+        self.grid_columnconfigure((1, 3, 5), weight=1)
+
+        # Variables
+        self.x_col_var = StringVar(value="frame")
+        self.y_cols_selected = []
+        self.aggregation_var = StringVar(value="mean")
+        self.error_bars_var = StringVar(value="std")
+        self.title = StringVar()
+        self.xlabel = StringVar()
+        self.ylabel = StringVar()
+        self.show_individual_var = BooleanVar(value=False)
+        self.smooth_var = BooleanVar(value=False)
+        self.smooth_window_var = StringVar(value="3")
+
+        # Title
+        title_label = ctk.CTkLabel(
+            self, 
+            text="📈 Time Series Plot Configuration", 
+            font=ctk.CTkFont(size=16, weight="bold")
+        )
+        title_label.grid(row=0, column=0, columnspan=6, pady=(10, 15))
+
+        # Main controls row 1
+        ctk.CTkLabel(self, text="Time axis:", font=ctk.CTkFont(size=12, weight="bold")).grid(
+            row=1, column=0, padx=10, pady=5, sticky="e"
+        )
+        self.x_col_dropdown = ctk.CTkComboBox(
+            self, variable=self.x_col_var, 
+            values=["frame", "time"], width=120,
+            font=ctk.CTkFont(size=11)
+        )
+        self.x_col_dropdown.grid(row=1, column=1, padx=5, pady=5, sticky="ew")
+
+        ctk.CTkLabel(self, text="Aggregation:", font=ctk.CTkFont(size=12, weight="bold")).grid(
+            row=1, column=2, padx=10, pady=5, sticky="e"
+        )
+        self.aggregation_dropdown = ctk.CTkComboBox(
+            self, variable=self.aggregation_var, 
+            values=["mean", "median", "sum"], width=100,
+            font=ctk.CTkFont(size=11)
+        )
+        self.aggregation_dropdown.grid(row=1, column=3, padx=5, pady=5, sticky="ew")
+
+        ctk.CTkLabel(self, text="Error bars:", font=ctk.CTkFont(size=12, weight="bold")).grid(
+            row=1, column=4, padx=10, pady=5, sticky="e"
+        )
+        self.error_bars_dropdown = ctk.CTkComboBox(
+            self, variable=self.error_bars_var, 
+            values=["std", "sem", "ci", "none"], width=100,
+            font=ctk.CTkFont(size=11)
+        )
+        self.error_bars_dropdown.grid(row=1, column=5, padx=5, pady=5, sticky="ew")
+
+        # Y-axis metrics selection
+        ctk.CTkLabel(self, text="Metrics:", font=ctk.CTkFont(size=12, weight="bold")).grid(
+            row=2, column=0, padx=10, pady=5, sticky="ne"
+        )
+        
+        # Scrollable frame for metric checkboxes
+        self.metrics_frame = ctk.CTkScrollableFrame(self, height=40)
+        self.metrics_frame._scrollbar.configure(height=5)  # Shorter scrollbar
+        self.metrics_frame.grid(row=2, column=1, columnspan=6, sticky="ew", padx=5, pady=5)
+
+        # Options row
+        options_frame = ctk.CTkFrame(self, fg_color="transparent")
+        options_frame.grid(row=3, column=0, columnspan=6, sticky="ew", padx=10, pady=5)
+        
+        self.show_individual_check = ctk.CTkCheckBox(
+            options_frame, text="📊 Show individual traces", 
+            variable=self.show_individual_var,
+            font=ctk.CTkFont(size=11)
+        )
+        self.show_individual_check.pack(side="left", padx=5)
+        
+        self.smooth_check = ctk.CTkCheckBox(
+            options_frame, text="🌊 Smooth data", 
+            variable=self.smooth_var,
+            font=ctk.CTkFont(size=11)
+        )
+        self.smooth_check.pack(side="left", padx=5)
+        
+        ctk.CTkLabel(options_frame, text="Window:", font=ctk.CTkFont(size=11)).pack(side="left", padx=(10, 2))
+        self.smooth_window_entry = ctk.CTkEntry(
+            options_frame, textvariable=self.smooth_window_var, width=50
+        )
+        self.smooth_window_entry.pack(side="left", padx=2)
+
+        # Buttons row
+        button_frame = ctk.CTkFrame(self, fg_color="transparent")
+        button_frame.grid(row=4, column=0, columnspan=6, padx=10, pady=5, sticky="ew")
+        
+        self.update_button = ctk.CTkButton(
+            button_frame, text="📈 Update Plot", command=self.update_callback,
+            font=ctk.CTkFont(size=12, weight="bold"), height=32
+        )
+        self.update_button.pack(side="left", padx=5)
+        
+        self.save_button = ctk.CTkButton(
+            button_frame, text="💾 Save Plot", command=self.save_time_series_plot,
+            font=ctk.CTkFont(size=12, weight="bold"), height=32
+        )
+        self.save_button.pack(side="left", padx=5)
+
+        # Advanced plot types
+        # advanced_frame = ctk.CTkFrame(self, fg_color="transparent")
+        # advanced_frame.grid(row=5, column=0, columnspan=6, sticky="ew", padx=10, pady=5)
+        
+        # self.heatmap_button = ctk.CTkButton(
+        #     advanced_frame, text="🔥 Time Heatmap", command=self.create_heatmap,
+        #     font=ctk.CTkFont(size=11, weight="bold"), height=28,
+        #     fg_color="orange", hover_color="darkorange"
+        # )
+        # self.heatmap_button.pack(side="left", padx=5)
+        
+        # self.trends_button = ctk.CTkButton(
+        #     advanced_frame, text="📊 Trend Analysis", command=self.create_trends,
+        #     font=ctk.CTkFont(size=11, weight="bold"), height=28,
+        #     fg_color="purple", hover_color="darkpurple"
+        # )
+        # self.trends_button.pack(side="left", padx=5)
+        
+        # self.multi_metric_button = ctk.CTkButton(
+        #     advanced_frame, text="📈 Multi-Metric", command=self.create_multi_metric,
+        #     font=ctk.CTkFont(size=11, weight="bold"), height=28,
+        #     fg_color="teal", hover_color="darkteal"
+        # )
+        # self.multi_metric_button.pack(side="left", padx=5)
+
+        # Label customization row
+        ctk.CTkLabel(self, text="Title:", font=ctk.CTkFont(size=11)).grid(
+            row=6, column=0, padx=10, pady=5, sticky="e"
+        )
+        self.title_entry = ctk.CTkEntry(
+            self, textvariable=self.title, width=150,
+            placeholder_text="Auto-generated"
+        )
+        self.title_entry.grid(row=6, column=1, padx=5, pady=5, sticky="ew")
+
+        ctk.CTkLabel(self, text="X label:", font=ctk.CTkFont(size=11)).grid(
+            row=6, column=2, padx=10, pady=5, sticky="e"
+        )
+        self.xlabel_entry = ctk.CTkEntry(
+            self, textvariable=self.xlabel, width=150,
+            placeholder_text="Auto-generated from time axis"
+        )
+        self.xlabel_entry.grid(row=6, column=3, padx=5, pady=5, sticky="ew")
+
+        ctk.CTkLabel(self, text="Y label:", font=ctk.CTkFont(size=11)).grid(
+            row=6, column=4, padx=10, pady=5, sticky="e"
+        )
+        self.ylabel_entry = ctk.CTkEntry(
+            self, textvariable=self.ylabel, width=150,
+            placeholder_text="Auto-generated from metrics"
+        )
+        self.ylabel_entry.grid(row=6, column=5, padx=5, pady=5, sticky="ew")
+
+        # Initialize
+        self.metric_vars = []
+
+    def update_metrics(self, numeric_cols):
+        """Update available metrics for selection"""
+        # Clear existing checkboxes
+        for widget in self.metrics_frame.winfo_children():
+            widget.destroy()
+        
+        self.metric_vars = []
+        
+        # Add time columns to x-axis dropdown if available
+        time_cols = ["frame", "time"]
+        available_time_cols = [col for col in time_cols if col in self.experiment.regionprops.columns]
+        if available_time_cols:
+            self.x_col_dropdown.configure(values=available_time_cols)
+            if not self.x_col_var.get() in available_time_cols:
+                self.x_col_var.set(available_time_cols[0])
+        
+        # Create checkboxes for each numeric column
+        for i, col in enumerate(numeric_cols):
+            var = BooleanVar(value=(i < 3))  # Select first 3 by default
+            self.metric_vars.append((col, var))
+            
+            checkbox = ctk.CTkCheckBox(
+                self.metrics_frame, 
+                text=col.replace('_', ' ').title(), 
+                variable=var,
+                font=ctk.CTkFont(size=11)
+            )
+            # Arrange in a grid-like manner
+            checkbox.grid(row=i//5, column=i%5, sticky="w", padx=5, pady=2)
+
+    def get_selected_metrics(self):
+        """Get list of selected metrics"""
+        return [col for col, var in self.metric_vars if var.get()]
+
+    def save_time_series_plot(self):
+        """Save time series plot with error handling"""
+        try:
+            filepath = asksaveasfilename(
+                defaultextension=".png", 
+                filetypes=[("PNG files", "*.png"), ("PDF files", "*.pdf"), 
+                          ("SVG files", "*.svg"), ("All files", "*.*")]
+            )
+            if filepath and self.plots and hasattr(self.plots, 'time_series_plot') and self.plots.time_series_plot:
+                self.plots.save_publication_plot(self.plots.time_series_plot, filepath=filepath)
+                print(f"Plot saved to: {filepath}")
+        except Exception as e:
+            print(f"Error saving plot: {e}")
+
+    def create_heatmap(self):
+        """Create time series heatmap"""
+        if not self.plots:
+            return
+        
+        selected_metrics = self.get_selected_metrics()
+        if not selected_metrics:
+            return
+        
+        x_col = self.x_col_var.get()
+        y_col = selected_metrics[0]  # Use first selected metric
+        
+        try:
+            fig = self.plots.plot_time_series_heatmap(
+                x_col=x_col, y_col=y_col, show=False
+            )
+            self.update_callback()  # This will refresh the current plot display
+            print(f"✅ Heatmap created for {y_col} over {x_col}")
+        except Exception as e:
+            print(f"Error creating heatmap: {e}")
+
+    def create_trends(self):
+        """Create temporal trends plot"""
+        if not self.plots:
+            return
+        
+        selected_metrics = self.get_selected_metrics()
+        if not selected_metrics:
+            return
+        
+        x_col = self.x_col_var.get()
+        
+        try:
+            fig = self.plots.plot_temporal_trends(
+                x_col=x_col, y_cols=selected_metrics[:2], show=False  # Limit to 2 for readability
+            )
+            self.update_callback()  # This will refresh the current plot display
+            print(f"✅ Trend analysis created for {selected_metrics[:2]}")
+        except Exception as e:
+            print(f"Error creating trends plot: {e}")
+
+    def create_multi_metric(self):
+        """Create multi-metric time series plot"""
+        if not self.plots:
+            return
+        
+        selected_metrics = self.get_selected_metrics()
+        if not selected_metrics:
+            return
+        
+        x_col = self.x_col_var.get()
+        
+        try:
+            fig = self.plots.plot_multi_metric_time_series(
+                x_col=x_col, y_cols=selected_metrics, normalize=True, show=False
+            )
+            self.update_callback()  # This will refresh the current plot display
+            print(f"✅ Multi-metric plot created with {len(selected_metrics)} metrics")
+        except Exception as e:
+            print(f"Error creating multi-metric plot: {e}")
 
 class StatsTabFrame(ctk.CTkFrame):
     def __init__(self, master):
@@ -594,8 +872,9 @@ class GroupFrame(ctk.CTkFrame):
         
         # Files list frame with responsive sizing
         self.files_frame = ctk.CTkScrollableFrame(
-            self, height=80, corner_radius=8
+            self, height=40, corner_radius=8
         )
+        self.files_frame._scrollbar.configure(height=5)  # Shorter scrollbar
         self.files_frame.grid(row=1, column=0, columnspan=4, sticky="ew", padx=5, pady=5)
         
         # Buttons frame
@@ -819,6 +1098,7 @@ class FilterControlsFrame(ctk.CTkFrame):
         
         # Category selection (scrollable frame for checkboxes)
         self.categories_frame = ctk.CTkScrollableFrame(self.categorical_frame, height=80)
+        self.categories_frame._scrollbar.configure(height=5)  # Shorter scrollbar
         self.categories_frame.grid(row=1, column=0, columnspan=2, sticky="ew", padx=5, pady=5)
         
         # Hide categorical frame initially
@@ -834,6 +1114,7 @@ class FilterControlsFrame(ctk.CTkFrame):
         
         # Filters list frame
         self.filters_list_frame = ctk.CTkScrollableFrame(self, height=150)
+        self.filters_list_frame._scrollbar.configure(height=5)  # Shorter scrollbar
         self.filters_list_frame.grid(row=4, column=0, sticky="ew", padx=10, pady=5)
         
         # Control buttons
@@ -1450,6 +1731,7 @@ class RegionpropsApp:
         data_input_frame = ctk.CTkScrollableFrame(
             self.left_tabs.tab("📂 Data Input")
         )
+        data_input_frame._scrollbar.configure(height=5)  # Shorter scrollbar
         data_input_frame.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
         data_input_frame.grid_columnconfigure(0, weight=1)
         
@@ -1532,11 +1814,12 @@ class RegionpropsApp:
         self.plot_tabs.add("🔍 Scatter")
         self.plot_tabs.add("🌟 Pairplot")
         self.plot_tabs.add("📈 PCA")
+        self.plot_tabs.add("⏰ Time Series")  # Add this new tab
         self.plot_tabs.add("📊 Statistics")
         self.plot_tabs.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
         
         # Configure tab frames
-        for tab_name in ["📊 Categorical", "🔍 Scatter", "🌟 Pairplot", "📈 PCA", "📊 Statistics"]:
+        for tab_name in ["📊 Categorical", "🔍 Scatter", "🌟 Pairplot", "📈 PCA", "⏰ Time Series", "📊 Statistics"]:
             self.plot_tabs.tab(tab_name).grid_columnconfigure(0, weight=1)
             self.plot_tabs.tab(tab_name).grid_rowconfigure(1, weight=1)
         
@@ -1608,10 +1891,27 @@ class RegionpropsApp:
         self.pca_plot_frame.grid_columnconfigure(0, weight=1)
         self.pca_plot_frame.grid_rowconfigure(0, weight=1)
         
-        # Statistics setup
+        # Time Series setup - ADD THIS SECTION
+        self.timeseries_controls = TimeSeriesControlsFrame(
+            self.plot_tabs.tab("⏰ Time Series"), 
+            self.experiment, 
+            None,
+            self.update_timeseries_plot
+        )
+        self.timeseries_controls.grid(row=0, column=0, sticky="ew", padx=10, pady=5)
+        
+        self.timeseries_plot_frame = ctk.CTkFrame(
+            self.plot_tabs.tab("⏰ Time Series"), 
+            corner_radius=15
+        )
+        self.timeseries_plot_frame.grid(row=1, column=0, sticky="nsew", padx=10, pady=5)
+        self.timeseries_plot_frame.grid_columnconfigure(0, weight=1)
+        self.timeseries_plot_frame.grid_rowconfigure(0, weight=1)
+        
+        # Statistics setup (keep existing)
         self.stats_tab = StatsTabFrame(self.plot_tabs.tab("📊 Statistics"))
         self.stats_tab.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
-    
+
     def add_group_frame(self):
         """Add a new group configuration frame"""
         # Remove existing "Add Another Group" button if it exists
@@ -1688,6 +1988,7 @@ class RegionpropsApp:
             self.scatter_controls.update_dropdowns(numeric_cols)
             self.cat_controls.update_dropdowns(numeric_cols)
             self.pairplot_controls.update_columns(numeric_cols)
+            self.timeseries_controls.update_metrics(numeric_cols)  # Add this line
             
             # Update filter controls
             if hasattr(self, 'filter_controls'):
@@ -1709,12 +2010,72 @@ class RegionpropsApp:
             self.scatter_controls.plots = self.plots
             self.pairplot_controls.plots = self.plots
             self.pca_controls.plots = self.plots
+            self.timeseries_controls.plots = self.plots  # Add this line
     
     def clear_frame(self, frame):
         """Clear all widgets from a frame"""
         for widget in frame.winfo_children():
             widget.destroy()
     
+    def style_all_legends(self, fig):
+        """Comprehensively style all legends in a figure for dark theme"""
+        legends_to_style = []
+        
+        # Method 1: Figure-level legends
+        if hasattr(fig, '_legend') and fig._legend:
+            legends_to_style.append(fig._legend)
+        
+        # Method 2: Figure.legends list
+        if hasattr(fig, 'legends') and fig.legends:
+            legends_to_style.extend(fig.legends)
+        
+        # Method 3: Axes-level legends
+        for ax in fig.axes:
+            legend = ax.get_legend()
+            if legend:
+                legends_to_style.append(legend)
+        
+        # Method 4: Search all figure children for legend-like objects
+        def find_legends_recursive(obj):
+            legends = []
+            if hasattr(obj, 'get_texts') and hasattr(obj, 'get_frame'):
+                try:
+                    # Test if it behaves like a legend
+                    obj.get_frame()
+                    obj.get_texts()
+                    legends.append(obj)
+                except:
+                    pass
+            
+            if hasattr(obj, 'get_children'):
+                for child in obj.get_children():
+                    legends.extend(find_legends_recursive(child))
+            
+            return legends
+        
+        legends_to_style.extend(find_legends_recursive(fig))
+        
+        # Remove duplicates
+        legends_to_style = list(set(legends_to_style))
+        
+        # Style all found legends
+        for legend in legends_to_style:
+            try:
+                frame = legend.get_frame()
+                frame.set_facecolor('#2b2b2b')
+                frame.set_edgecolor('#ffffff')
+                frame.set_alpha(0.9)
+                
+                for text in legend.get_texts():
+                    text.set_color('#ffffff')
+                
+                if hasattr(legend, 'get_title') and legend.get_title():
+                    legend.get_title().set_color('#ffffff')
+                    
+            except Exception as e:
+                print(f"Could not style legend: {e}")
+                continue
+
     def apply_figure_style(self, fig, grid_style='--', grid_alpha=0.3):
         """Apply consistent dark styling to matplotlib figures"""
         # Set figure size to fit better in frames
@@ -1732,14 +2093,9 @@ class RegionpropsApp:
             ax.yaxis.label.set_color('#ffffff')
             ax.title.set_color('#ffffff')
             ax.grid(True, linestyle=grid_style, alpha=grid_alpha, color='#ffffff')
-            
-            # Style legend if present
-            legend = ax.get_legend()
-            if legend:
-                legend.get_frame().set_facecolor('#2b2b2b')
-                legend.get_frame().set_edgecolor('#ffffff')
-                for text in legend.get_texts():
-                    text.set_color('#ffffff')
+        
+        # Style all legends comprehensively
+        self.style_all_legends(fig)
         
         # Adjust layout to fit better
         fig.tight_layout(pad=1.0)
@@ -1885,6 +2241,69 @@ class RegionpropsApp:
             )
             error_label.grid(row=0, column=0)
     
+    def update_timeseries_plot(self):
+        """Update the time series plot"""
+        if not self.plots:
+            return
+        
+        x_col = self.timeseries_controls.x_col_var.get()
+        selected_metrics = self.timeseries_controls.get_selected_metrics()
+        
+        if not x_col or not selected_metrics:
+            return
+        
+        # Check if time column exists
+        if x_col not in self.experiment.regionprops.columns:
+            # Show info message
+            self.clear_frame(self.timeseries_plot_frame)
+            info_label = ctk.CTkLabel(
+                self.timeseries_plot_frame, 
+                text=f"⚠️ Time column '{x_col}' not found in data.\nAvailable columns: {list(self.experiment.regionprops.columns)}",
+                font=ctk.CTkFont(size=12),
+                text_color="orange",
+                justify="center"
+            )
+            info_label.grid(row=0, column=0, padx=5, pady=5)
+            return
+        
+        # Get plot parameters
+        aggregation = self.timeseries_controls.aggregation_var.get()
+        error_bars = self.timeseries_controls.error_bars_var.get()
+        show_individual = self.timeseries_controls.show_individual_var.get()
+        smooth = self.timeseries_controls.smooth_var.get()
+        
+        try:
+            smooth_window = int(self.timeseries_controls.smooth_window_var.get())
+        except ValueError:
+            smooth_window = 3
+        
+        title = self.timeseries_controls.title.get() or f'Time Series: {", ".join(selected_metrics[:3])}'
+        xlabel = self.timeseries_controls.xlabel.get() or x_col.replace('_', ' ').title()
+        ylabel = self.timeseries_controls.ylabel.get() or 'Metric Value'
+        
+        try:
+            fig = self.plots.plot_time_series(
+                x_col=x_col, y_cols=selected_metrics,
+                title=title, xlabel=xlabel, ylabel=ylabel,
+                aggregation=aggregation, error_bars=error_bars,
+                show_individual=show_individual, smooth=smooth,
+                smooth_window=smooth_window, show=False
+            )
+            self.apply_figure_style(fig)
+            
+            # Use safe plot creation
+            self.create_and_embed_plot(self.timeseries_plot_frame, fig)
+            
+        except Exception as e:
+            self.clear_frame(self.timeseries_plot_frame)
+            error_label = ctk.CTkLabel(
+                self.timeseries_plot_frame, 
+                text=f"Error generating plot: {str(e)}",
+                font=ctk.CTkFont(size=12),
+                text_color="red"
+            )
+            error_label.grid(row=0, column=0)
+
     def finalize(self):
         """Finalize experiment and generate all plots"""
         if self.experiment.regionprops.empty:

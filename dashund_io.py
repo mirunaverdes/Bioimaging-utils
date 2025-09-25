@@ -7,7 +7,7 @@ import dask.array as da
 from aicsimageio import AICSImage, imread
 
 # Class that extends AICSImage to add functions to output data compatible with cellpose
-class dash_AICSImage(AICSImage):
+class dash_bioImage(AICSImage):
     def __init__(self, image, segment_channels=None, intensity_channels=None, reader = None, reconstruct_mosaic = True, fs_kwargs = ..., **kwargs):
         super().__init__(image, reader, reconstruct_mosaic, fs_kwargs, **kwargs)  
         

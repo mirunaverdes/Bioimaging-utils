@@ -149,11 +149,40 @@ class Experiment:
         self.summary = pd.DataFrame()
         self.scatter_plot = None
         self.cat_plot = None
-        self.joint_plot = None # Not implemented
+        self.joint_plot = None
         self.pair_plot = None
         self.figSize = FIG_SIZE
-        self.statistics = ExperimentStatistics(self)  # Use composition
-        self.plots = ExperimentPlots(self, self.regionprops)  # Use composition
+        # Initialize without statistics - create when needed
+        self._statistics = None
+        self.plots = ExperimentPlots(self, self.regionprops)
+
+    @property
+    def statistics(self):
+        """Lazy initialization of statistics with current regionprops data"""
+        if self._statistics is None or len(self.regionprops) == 0:
+            self._statistics = ExperimentStatistics(self.regionprops)
+        else:
+            # Update the statistics object with current data
+            self._statistics.regionprops = self.regionprops
+        return self._statistics
+
+    def load_test_data(self):
+        """ Load experiment test data from Test_inputs directory\Regionprops csv files"""
+        from experiment import ExperimentSample 
+        import os
+        # Set test data directory
+        test_data_dir = os.path.join(os.getcwd(), "Test_inputs", "Regionprops", "pHRhodo")
+        group_dirs = [d for d in os.listdir(test_data_dir) if os.path.isdir(os.path.join(test_data_dir, d))]
+        for group in group_dirs:
+            group_path = os.path.join(test_data_dir, group)
+            sample_files = [f for f in os.listdir(group_path) if f.endswith('.csv')]
+            for sample_file in sample_files:
+                sample_path = os.path.join(group_path, sample_file)
+                sample_name = os.path.splitext(sample_file)[0]
+                sample = ExperimentSample(name=sample_name, group=group, regionprops_df_path=sample_path, normalize=False)
+                self.add_sample(sample)
+        print(f"Loaded {len(self.samples)} samples from {len(group_dirs)} groups.")
+        self.summarize()
 
     def add_sample(self, sample):
         self.samples.append(sample)
@@ -163,6 +192,9 @@ class Experiment:
         sampleDf['group'] = sample.group
         # Add to Experiment repeats dataframe
         self.regionprops = pd.concat([self.regionprops, sampleDf], ignore_index=True)
+        
+        # Reset statistics to reflect new data
+        self._statistics = None
 
     def remove_sample(self, sample_name):
         self.samples = [s for s in self.samples if s.name != sample_name]
@@ -261,6 +293,8 @@ class Experiment:
         
         if apply_to_original:
             self.regionprops = df
+            # Reset statistics to reflect filtered data
+            self._statistics = None
             print(f"Applied filters to original data: {filter_summary}")
         else:
             print(f"Filter preview: {filter_summary}")
